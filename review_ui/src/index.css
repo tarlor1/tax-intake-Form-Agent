@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: #f5f7f4;
+  --foreground: #20332f;
+  --card: #ffffff;
+  --card-foreground: #20332f;
+  --primary: #24654e;
+  --primary-foreground: #ffffff;
+  --secondary: #edf4ef;
+  --secondary-foreground: #194e3b;
+  --muted: #edf1ec;
+  --muted-foreground: #66756e;
+  --accent: #e8f2eb;
+  --accent-foreground: #194e3b;
+  --destructive: #93472f;
+  --border: #dfe5df;
+  --input: #ccd6ce;
+  --ring: #418975;
+  --radius: 0.5rem;
+}
+
+@theme inline {
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 0.25rem);
+  --radius-md: calc(var(--radius) - 0.125rem);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 0.25rem);
+  --animate-intake-progress: intake-progress 1.4s ease-in-out infinite;
+
+  @keyframes intake-progress {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(350%); }
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply m-0 min-w-[360px] bg-background font-sans text-sm text-foreground antialiased; }
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: pointer; }
+}
