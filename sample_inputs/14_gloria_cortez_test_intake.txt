@@ -14,6 +14,10 @@ W-2 practice employer EIN: 12-3456789 (test input only; not an assertion about a
 W-2 practice employer address: 1200 Maiden Lane, Brooklyn, NY 11235, United States.
 W-2 employee: Gloria Cortez Test. Use the taxpayer's practice mailing address above.
 
+1099-R practice payer name: Spring Federal Credit Union Test.
+1099-R practice payer EIN: 12-3456788 (synthetic input for the unfiled practice draft only; not a verified real payer ID).
+1099-R practice payer address: 1200 Spring Avenue, Brooklyn, NY 11235, United States.
+
 Taxpayer and dependent identifiers are supplied separately to the local runner. The taxpayer's mock SSN is also the W-2 employee mock SSN. Do not extract the masked identifiers in the original packet or invent replacements.
 
-The original W-2 remains the source for the six federal box amounts. This supplement does not specify state withholding identifiers, document amounts, or answers for unrelated tax sections. Leave unsupported fields for review.
+The original W-2 and 1099-R remain the sources for their box amounts. This supplement does not specify state withholding identifiers or answers for unrelated tax sections. Leave unsupported fields for review.
