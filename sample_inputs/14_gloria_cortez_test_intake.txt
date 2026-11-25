@@ -18,6 +18,16 @@ W-2 employee: Gloria Cortez Test. Use the taxpayer's practice mailing address ab
 1099-R practice payer EIN: 12-3456788 (synthetic input for the unfiled practice draft only; not a verified real payer ID).
 1099-R practice payer address: 1200 Spring Avenue, Brooklyn, NY 11235, United States.
 
+W-2G practice payer name: Winbig Casino Test.
+W-2G practice payer EIN: 12-3456787 (synthetic input for the unfiled practice draft only).
+W-2G practice payer address: 777 Jackpot Road, Brooklyn, NY 11235, United States.
+
+Dependent-care practice provider name: Kitty Kloud Daycare (as printed on the source statement).
+Dependent-care practice provider EIN: 12-3456786 (synthetic input for the unfiled practice draft only).
+Dependent-care practice provider address: 303 Twiggs Trail, Brooklyn, NY 11235, United States.
+Childcare interview assumptions for this practice run: no employer dependent-care benefits outside the W-2; no disability or full-time student exception; none of the daycare payment was for 2024 care.
+Health coverage assumption for this practice run: no Marketplace policy or Form 1095-A.
+
 Taxpayer and dependent identifiers are supplied separately to the local runner. The taxpayer's mock SSN is also the W-2 employee mock SSN. Do not extract the masked identifiers in the original packet or invent replacements.
 
-The original W-2 and 1099-R remain the sources for their box amounts. This supplement does not specify state withholding identifiers or answers for unrelated tax sections. Leave unsupported fields for review.
+The original W-2, 1099-R, and W-2G remain the sources for their box amounts. This supplement does not specify state withholding identifiers or answers for unrelated tax sections. Leave unsupported fields for review.
