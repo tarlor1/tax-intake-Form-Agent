@@ -1,4 +1,4 @@
-"""Read-only qualification of the licensed Sigma Web 2025 return entry point."""
+"""Guarded entry inspection and summary exit for licensed Sigma Web 2025."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from playwright.async_api import Error, Page, Request, Route, async_playwright
 
 from .sigma_web import WebBlocked
+from .web_controls import ControlBlocked, click_visible_target
 
 _ORIGIN = "https://stp.cloudtaxoffice.com"
 _DISPLAY = re.compile(rf"{re.escape(_ORIGIN)}/proavalon/TaxpayerProfile/Display\?_=[0-9]{{1,20}}")
@@ -22,6 +23,37 @@ _SSN_SEGMENTS = (3, 2, 4, 3, 2, 4)
 _DUPLICATE_NOTICE = (
     "There is already a return using this SSN, please view the return via the client list or use a new SSN."
 )
+_SUMMARY_TITLE = "stp - Tax Return Summary"
+_EXIT_TITLE = "stp - Office Client List"
+
+
+async def exit_summary(page: Page) -> None:
+    """Release the owned 2025 draft through Sigma's two-step Exit Return UI."""
+    if (
+        page.context.pages != [page] or not page.url.lower().startswith(f"{_ORIGIN}/2025/avalon/")
+        or await page.title() != _SUMMARY_TITLE
+        or not await page.get_by_role("heading", name="Tax Return Summary", exact=True).is_visible()
+    ):
+        raise WebBlocked("Sigma is not on the verified 2025 Tax Return Summary.")
+
+    exit_link = page.get_by_role("link", name="Exit Return", exact=True).and_(page.locator("#sblnk_SignOut"))
+    prompt = page.get_by_text("Ready to go?", exact=True)
+    confirm = page.get_by_role("button", name="EXIT RETURN", exact=True)
+    try:
+        if await exit_link.count() != 1 or not await exit_link.is_visible() or await confirm.is_visible():
+            raise WebBlocked("Sigma exit control or confirmation is ambiguous.")
+        await exit_link.press("Enter", timeout=5_000)
+        await prompt.wait_for(timeout=5_000)
+        await click_visible_target(confirm)
+        await page.wait_for_function("(title) => document.title === title", arg=_EXIT_TITLE, timeout=10_000)
+    except (Error, ControlBlocked):
+        raise WebBlocked("Sigma exit outcome is unconfirmed. Inspect the active draft before retrying.") from None
+
+    if (
+        page.context.pages != [page] or not page.url.startswith(f"{_ORIGIN}/")
+        or page.url.lower().startswith(f"{_ORIGIN}/2025/avalon/") or await prompt.is_visible()
+    ):
+        raise WebBlocked("Sigma exit outcome is unconfirmed. Inspect the active draft before retrying.")
 
 
 def _allow_display(method: str, url: str) -> bool:

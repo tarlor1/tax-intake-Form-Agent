@@ -18,6 +18,28 @@ async def _visible_enabled(control: Locator) -> None:
         raise ControlBlocked("missing-or-ambiguous-form-control")
 
 
+async def click_visible_target(control: Locator) -> None:
+    """Click an exposed part of a unique control, never through an overlay."""
+    await _visible_enabled(control)
+    await control.scroll_into_view_if_needed()
+    box = await control.bounding_box()
+    if box is None:
+        raise ControlBlocked("unreachable-control")
+    for fraction in (0.5, 0.75, 0.25, 0.9, 0.1):
+        point = {"x": box["width"] * fraction, "y": box["height"] / 2}
+        receives_input = await control.evaluate(
+            """(element, point) => {
+                const rect = element.getBoundingClientRect();
+                return element.contains(document.elementFromPoint(rect.left + point.x, rect.top + point.y));
+            }""",
+            point,
+        )
+        if receives_input:
+            await control.click(position=point, timeout=5_000)
+            return
+    raise ControlBlocked("unreachable-control")
+
+
 async def resolve_question_control(
     scope: Locator, group_selector: str, question: str, control_selector: str,
 ) -> Locator:
@@ -68,27 +90,7 @@ async def enter_control(control: Locator, kind: ControlKind, value: str) -> None
         if await popup.get_attribute("id") != popup_id:
             raise ControlBlocked("unbound-combobox-popup")
         option = popup.get_by_role("option", name=value, exact=True)
-        await _visible_enabled(option)
-        await option.scroll_into_view_if_needed()
-        # A sticky sidebar can cover the center of a wide option. Click only
-        # where the browser confirms this exact option receives the input.
-        box = await option.bounding_box()
-        if box is None:
-            raise ControlBlocked("unreachable-combobox-option")
-        for fraction in (0.5, 0.75, 0.25, 0.9, 0.1):
-            point = {"x": box["width"] * fraction, "y": box["height"] / 2}
-            receives_input = await option.evaluate(
-                """(element, point) => {
-                    const rect = element.getBoundingClientRect();
-                    return element.contains(document.elementFromPoint(rect.left + point.x, rect.top + point.y));
-                }""",
-                point,
-            )
-            if receives_input:
-                await option.click(position=point)
-                break
-        else:
-            raise ControlBlocked("unreachable-combobox-option")
+        await click_visible_target(option)
         if await control.get_attribute("aria-expanded") != "false" or await read_control(control, kind) != value:
             raise ControlBlocked("unconfirmed-combobox-selection")
     else:
