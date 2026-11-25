@@ -19,10 +19,22 @@ _DISPLAY = re.compile(rf"{re.escape(_ORIGIN)}/proavalon/TaxpayerProfile/Display\
 _ENTRY = "Start New 2025 Tax Return"
 _DIALOG = "dialog[open]:visible, [role=dialog]:visible, .modal.show:visible"
 _SSN_SEGMENTS = (3, 2, 4, 3, 2, 4)
+_DUPLICATE_NOTICE = (
+    "There is already a return using this SSN, please view the return via the client list or use a new SSN."
+)
 
 
 def _allow_display(method: str, url: str) -> bool:
     return method == "GET" and _DISPLAY.fullmatch(url) is not None
+
+
+async def _stop_on_duplicate(page: Page) -> None:
+    # Only the visible validation message in Sigma's dialog is authoritative.
+    notice = page.locator(_DIALOG).locator("li:visible").filter(
+        has_text=re.compile(rf"^\s*{re.escape(_DUPLICATE_NOTICE)}\s*$"),
+    )
+    if await notice.count():
+        raise WebBlocked("Sigma reports an existing return for this SSN. Do not retry Start Return.")
 
 
 async def inspect_return_entry(page: Page, *, mock_ssn: str | None = None) -> None:
@@ -34,6 +46,7 @@ async def inspect_return_entry(page: Page, *, mock_ssn: str | None = None) -> No
     if context.pages != [page] or not page.url.startswith(f"{_ORIGIN}/"):
         raise WebBlocked("Sigma inspection requires one owned page on the approved origin.")
 
+    await _stop_on_duplicate(page)
     candidate = page.get_by_role("button", name=_ENTRY, exact=True).and_(page.locator("a[role=button]"))
     try:
         await candidate.wait_for(timeout=120_000)
@@ -111,6 +124,7 @@ async def inspect_return_entry(page: Page, *, mock_ssn: str | None = None) -> No
             # Key events trigger Sigma's native focus advance between segments.
             await inputs.first.focus(timeout=5_000)
             await page.keyboard.type(digits * 2, delay=45)
+            await _stop_on_duplicate(page)
             if await inputs.evaluate_all("fields => fields.map(field => field.value)") != segments * 2:
                 raise WebBlocked("Sigma did not accept all six mock SSN segments. Nothing was submitted.")
     except Error:
