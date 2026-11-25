@@ -1,0 +1,19 @@
+2025 synthetic tax intake supplement — Gloria Cortez Test
+
+Practice only. This operator-approved supplement fills gaps in IRS VITA Form 6744 (October 2025), Basic Scenario 9, Gloria Cortez. Use it alongside the original practice packet: https://ortaxvolunteers.org/fed-pub-tools/f6744_2025.pdf#page=61
+
+Taxpayer practice name: Gloria Cortez Test. Given name: Gloria. Last name: Cortez Test.
+Taxpayer mailing address and permanent home address for this test: 509 Brighton Beach Ave, Brooklyn, NY 11235, United States.
+Daytime telephone for this test: 718-555-0100 (fictional).
+Residency for this test: full-year New York State and New York City resident (Brooklyn); not a Yonkers resident. County: Kings. School district: Brooklyn. Permanent home address is the same as the address on the return.
+
+Dependent practice name: Jessica Cortez Test. Given name: Jessica. Last name: Cortez Test. She is Gloria's daughter, was born January 21, 2015, is a U.S. citizen, and lived with Gloria for 12 months in 2025.
+
+W-2 practice employer name: Wilcox School District Test.
+W-2 practice employer EIN: 12-3456789 (test input only; not an assertion about any real employer).
+W-2 practice employer address: 1200 Maiden Lane, Brooklyn, NY 11235, United States.
+W-2 employee: Gloria Cortez Test. Use the taxpayer's practice mailing address above.
+
+Taxpayer and dependent identifiers are supplied separately to the local runner. The taxpayer's mock SSN is also the W-2 employee mock SSN. Do not extract the masked identifiers in the original packet or invent replacements.
+
+The original W-2 remains the source for the six federal box amounts. This supplement does not specify state withholding identifiers, document amounts, or answers for unrelated tax sections. Leave unsupported fields for review.
