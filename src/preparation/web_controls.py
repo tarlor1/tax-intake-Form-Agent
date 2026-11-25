@@ -18,6 +18,17 @@ async def _visible_enabled(control: Locator) -> None:
         raise ControlBlocked("missing-or-ambiguous-form-control")
 
 
+async def resolve_question_control(
+    scope: Locator, group_selector: str, question: str, control_selector: str,
+) -> Locator:
+    """Resolve an approved control inside its exact question, not by answer text alone."""
+    label = scope.page.get_by_text(question, exact=True).and_(scope.page.locator("label, legend, [role=alert]"))
+    group = scope.locator(group_selector).filter(has=label)
+    await _visible_enabled(group)
+    control = group.locator(control_selector)
+    await _visible_enabled(control)
+    return control
+
 async def read_control(control: Locator, kind: ControlKind) -> str:
     """Return the value or selected label used by the adapter's binding."""
     await _visible_enabled(control)
