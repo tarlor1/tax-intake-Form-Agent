@@ -7,6 +7,8 @@ import asyncio
 import re
 import stat
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from getpass import getpass
 from pathlib import Path
 
@@ -163,7 +165,11 @@ async def inspect_return_entry(page: Page, *, mock_ssn: str | None = None) -> No
         raise WebBlocked("Sigma did not show the reviewed 2025 SSN dialog.") from None
 
 
-async def _inspect(profile_directory: Path, chromium: Path | None, mock_ssn: str | None = None) -> None:
+@asynccontextmanager
+async def licensed_browser(
+    profile_directory: Path, chromium: Path | None = None,
+) -> AsyncIterator[Page]:
+    """Own one dedicated sandboxed Chromium profile for a licensed Sigma session."""
     if (not profile_directory.is_absolute() or not profile_directory.is_dir() or profile_directory.is_symlink()
             or (sys.platform != "win32" and profile_directory.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO))):
         raise WebBlocked("Use an absolute, private, dedicated Chromium profile directory.")
@@ -176,16 +182,20 @@ async def _inspect(profile_directory: Path, chromium: Path | None, mock_ssn: str
             if len(context.pages) != 1 or context.pages[0].url != "about:blank":
                 raise WebBlocked("The dedicated profile must start with one blank tab.")
             await context.route_web_socket("**/*", lambda socket: socket.close())
-            page = context.pages[0]
-            await page.goto(_ORIGIN, wait_until="domcontentloaded")
-            print("Waiting for the signed-in Sigma 2025 workspace. Sign in if prompted.", flush=True)
-            await inspect_return_entry(page, mock_ssn=mock_ssn)
-            if mock_ssn is None:
-                print("Verified Sigma 2025 SSN prompt: 3-2-4 and 3-2-4. No values entered or submitted.")
-            else:
-                print("Verified all six mock SSN segments in Sigma. Start Return was not pressed.")
+            yield context.pages[0]
         finally:
             await context.close()
+
+
+async def _inspect(profile_directory: Path, chromium: Path | None, mock_ssn: str | None = None) -> None:
+    async with licensed_browser(profile_directory, chromium) as page:
+        await page.goto(_ORIGIN, wait_until="domcontentloaded")
+        print("Waiting for the signed-in Sigma 2025 workspace. Sign in if prompted.", flush=True)
+        await inspect_return_entry(page, mock_ssn=mock_ssn)
+        if mock_ssn is None:
+            print("Verified Sigma 2025 SSN prompt: 3-2-4 and 3-2-4. No values entered or submitted.")
+        else:
+            print("Verified all six mock SSN segments in Sigma. Start Return was not pressed.")
 
 
 def main() -> None:
