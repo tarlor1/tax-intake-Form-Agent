@@ -1,0 +1,1 @@
+                sorted(field.binding_id for field in action.arguments.fields) if action.name == "set_fields" else
