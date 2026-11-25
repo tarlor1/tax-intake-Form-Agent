@@ -7,6 +7,7 @@ import asyncio
 import re
 import stat
 import sys
+from getpass import getpass
 from pathlib import Path
 
 from playwright.async_api import Error, Page, Request, Route, async_playwright
@@ -24,8 +25,11 @@ def _allow_display(method: str, url: str) -> bool:
     return method == "GET" and _DISPLAY.fullmatch(url) is not None
 
 
-async def inspect_return_entry(page: Page) -> None:
-    """Open and verify the 2025 modal in an owned page; keep network guards until close."""
+async def inspect_return_entry(page: Page, *, mock_ssn: str | None = None) -> None:
+    """Verify the 2025 modal and optionally test mock entry; never submit it."""
+    if mock_ssn is not None and not re.fullmatch(r"987-?65-?432[0-9]", mock_ssn):
+        raise WebBlocked("Use a mock SSN from the reserved 987-65-4320 through 987-65-4329 range.")
+
     context = page.context
     if context.pages != [page] or not page.url.startswith(f"{_ORIGIN}/"):
         raise WebBlocked("Sigma inspection requires one owned page on the approved origin.")
@@ -97,11 +101,23 @@ async def inspect_return_entry(page: Page) -> None:
         expected = {"ssn": True, "start": 1, "fields": [["text", length] for length in _SSN_SEGMENTS]}
         if context.pages != [page] or not page.url.startswith(f"{_ORIGIN}/") or shape != [expected]:
             raise WebBlocked("Unexpected Sigma draft prompt context, action, or SSN field layout.")
+        if mock_ssn is not None:
+            digits = mock_ssn.replace("-", "")
+            segments = [digits[:3], digits[3:5], digits[5:]]
+            inputs = page.locator(_DIALOG).locator("input:visible")
+            if await inputs.evaluate_all("fields => fields.some(field => field.value !== '')"):
+                raise WebBlocked("The Sigma SSN dialog is not blank.")
+
+            # Key events trigger Sigma's native focus advance between segments.
+            await inputs.first.focus(timeout=5_000)
+            await page.keyboard.type(digits * 2, delay=45)
+            if await inputs.evaluate_all("fields => fields.map(field => field.value)") != segments * 2:
+                raise WebBlocked("Sigma did not accept all six mock SSN segments. Nothing was submitted.")
     except Error:
         raise WebBlocked("Sigma did not show the reviewed 2025 SSN dialog.") from None
 
 
-async def _inspect(profile_directory: Path, chromium: Path | None) -> None:
+async def _inspect(profile_directory: Path, chromium: Path | None, mock_ssn: str | None = None) -> None:
     if (not profile_directory.is_absolute() or not profile_directory.is_dir() or profile_directory.is_symlink()
             or (sys.platform != "win32" and profile_directory.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO))):
         raise WebBlocked("Use an absolute, private, dedicated Chromium profile directory.")
@@ -117,8 +133,11 @@ async def _inspect(profile_directory: Path, chromium: Path | None) -> None:
             page = context.pages[0]
             await page.goto(_ORIGIN, wait_until="domcontentloaded")
             print("Waiting for the signed-in Sigma 2025 workspace. Sign in if prompted.", flush=True)
-            await inspect_return_entry(page)
-            print("Verified Sigma 2025 SSN prompt: 3-2-4 and 3-2-4. No values entered or submitted.")
+            await inspect_return_entry(page, mock_ssn=mock_ssn)
+            if mock_ssn is None:
+                print("Verified Sigma 2025 SSN prompt: 3-2-4 and 3-2-4. No values entered or submitted.")
+            else:
+                print("Verified all six mock SSN segments in Sigma. Start Return was not pressed.")
         finally:
             await context.close()
 
@@ -127,9 +146,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile-directory", required=True, type=Path)
     parser.add_argument("--chromium", type=Path, help="Path to the approved Chromium executable, if not bundled.")
+    parser.add_argument("--check-mock-ssn", action="store_true", help="Prompt for a reserved mock SSN to test autofill.")
     args = parser.parse_args()
     try:
-        asyncio.run(_inspect(args.profile_directory, args.chromium))
+        mock_ssn = getpass("Reserved mock SSN: ") if args.check_mock_ssn else None
+        asyncio.run(_inspect(args.profile_directory, args.chromium, mock_ssn))
     except WebBlocked as exc:
         parser.exit(1, f"{exc}\n")
     except Error:
