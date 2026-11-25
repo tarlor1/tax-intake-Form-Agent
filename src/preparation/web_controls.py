@@ -69,7 +69,26 @@ async def enter_control(control: Locator, kind: ControlKind, value: str) -> None
             raise ControlBlocked("unbound-combobox-popup")
         option = popup.get_by_role("option", name=value, exact=True)
         await _visible_enabled(option)
-        await option.press("Enter")
+        await option.scroll_into_view_if_needed()
+        # A sticky sidebar can cover the center of a wide option. Click only
+        # where the browser confirms this exact option receives the input.
+        box = await option.bounding_box()
+        if box is None:
+            raise ControlBlocked("unreachable-combobox-option")
+        for fraction in (0.5, 0.75, 0.25, 0.9, 0.1):
+            point = {"x": box["width"] * fraction, "y": box["height"] / 2}
+            receives_input = await option.evaluate(
+                """(element, point) => {
+                    const rect = element.getBoundingClientRect();
+                    return element.contains(document.elementFromPoint(rect.left + point.x, rect.top + point.y));
+                }""",
+                point,
+            )
+            if receives_input:
+                await option.click(position=point)
+                break
+        else:
+            raise ControlBlocked("unreachable-combobox-option")
         if await control.get_attribute("aria-expanded") != "false" or await read_control(control, kind) != value:
             raise ControlBlocked("unconfirmed-combobox-selection")
     else:
