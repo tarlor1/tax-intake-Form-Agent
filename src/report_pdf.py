@@ -1,8 +1,8 @@
-"""Step 7 (continued): render the run report as a styled PDF (outputs/run_report.pdf).
+"""Render the portfolio run report as a styled PDF.
 
 The report is built as HTML from the same results as the Markdown report, then printed to PDF
-by headless Chromium, which Playwright already provides. Screenshots are embedded, so the PDF
-can be shared on its own.
+by headless Chromium, which Playwright already provides. Verified receipt images are embedded
+without capturing the confirmation's client details.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from playwright.sync_api import sync_playwright
 
 from .models import Outcome, RecordResult
 from .redaction import describe_redactions
-from .reporting import RunInfo, RunSummary, format_duration, next_steps, verification_label
+from .reporting import RunInfo, RunSummary, format_duration, next_steps, outcome_label, verification_label
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ h2 { font-size: 13pt; margin: 22px 0 10px; color: #14532d; border-bottom: 1px so
 .banner .sub { opacity: .85; margin-top: 2px; }
 .meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 16px; margin-top: 12px; font-size: 9pt; }
 .meta div span { display: block; opacity: .75; font-size: 8pt; text-transform: uppercase; letter-spacing: .5px; }
-.tiles { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-top: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
 .tile { border: 1px solid #d8dee6; border-radius: 6px; padding: 8px 10px; }
 .tile b { display: block; font-size: 16pt; line-height: 1.1; }
 .tile span { font-size: 8pt; color: #5c6777; }
@@ -81,7 +81,7 @@ tr { page-break-inside: avoid; }
 
 _FOOTER = (
     '<div style="width:100%;font-size:7pt;color:#5c6777;padding:0 14mm;display:flex;justify-content:space-between;">'
-    "<span>Tax intake automation run report · fictional demo data</span>"
+    "<span>Tax intake automation run report</span>"
     '<span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>'
 )
 
@@ -91,21 +91,23 @@ def render_report_html(results: Sequence[RecordResult], summary: RunSummary, inf
         ("Run started", f"{info.started_at:%Y-%m-%d %H:%M:%S}"),
         ("Duration", format_duration(summary.duration_s)),
         ("AI engine", info.ai_engine),
+        ("Input source", info.input_source),
         ("Browser", info.browser_mode),
     ]
     if info.ai_usage:
         meta.append(("AI usage", info.ai_usage))
     tiles = [
         ("Processed", summary.processed),
-        ("Submitted", summary.submitted),
+        ("Submission attempts", summary.submitted),
         ("Verified PASS", summary.passed),
         ("Verified FAIL", summary.failed),
+        ("Checklist failures", summary.checklist_failures),
         ("Follow-up", summary.follow_ups),
         ("Human review", summary.needs_review),
         ("Errors", summary.errors),
     ]
     if summary.needs_attention:
-        status = ("bad", f"Attention needed: {summary.failed} verification failure(s), {summary.errors} error(s).")
+        status = ("bad", f"Attention needed: {summary.attention_detail}")
     elif summary.submitted:
         status = ("ok", "All submitted records verified.")
     else:
@@ -130,10 +132,7 @@ def render_report_html(results: Sequence[RecordResult], summary: RunSummary, inf
         parts += ["<h2>Next steps for staff</h2>", '<ul class="steps">']
         parts += [f"<li>{escape(step)}</li>" for step in steps]
         parts.append("</ul>")
-    parts.append(
-        '<div class="foot">Demo run on fictional data. Nothing was sent to any client or external system; '
-        "every draft requires human review.</div>"
-    )
+    parts.append(f'<div class="foot">{escape(info.disclosure)}</div>')
     body = "\n".join(parts)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -172,7 +171,7 @@ def _records_table(results: Sequence[RecordResult]) -> str:
             f"<td>{escape(record.full_name if record and record.full_name else '-')}</td>",
             f"<td>{record.tax_year if record and record.tax_year else '-'}</td>",
             f"<td>{_badge(urgency.capitalize(), _URGENCY_TONE[urgency]) if urgency else '-'}</td>",
-            f"<td>{_badge(result.outcome.value, _OUTCOME_TONE[result.outcome])}</td>",
+            f"<td>{_outcome_badge(result)}</td>",
             f"<td>{escape(result.intake_id or '-')}</td>",
             f"<td>{_verification_badge(result)}</td>",
             f'<td class="num">{format_duration(result.duration_s)}</td>',
@@ -188,7 +187,7 @@ def _records_table(results: Sequence[RecordResult]) -> str:
 def _record_card(number: int, result: RecordResult) -> str:
     record = result.extraction
     name = record.full_name if record and record.full_name else "Unidentified client"
-    badges = _badge(result.outcome.value, _OUTCOME_TONE[result.outcome])
+    badges = _outcome_badge(result)
     if result.outcome is Outcome.SUBMITTED:
         badges += " " + _verification_badge(result)
 
@@ -214,6 +213,8 @@ def _record_card(number: int, result: RecordResult) -> str:
         facts.append(f"<b>Intake ID:</b> {escape(result.intake_id)}")
     if result.verification_detail:
         facts.append(f"<b>Verification:</b> {escape(result.verification_detail)}")
+    if result.checklist_failed:
+        facts.append("<b>Document checklist:</b> Draft failed after verified submission.")
     if result.redacted:
         facts.append(f"<b>Redacted before AI:</b> {escape(describe_redactions(result.redacted))}")
     if result.extraction_attempts:
@@ -234,19 +235,26 @@ def _record_card(number: int, result: RecordResult) -> str:
 
 
 def _screenshot(result: RecordResult) -> str:
+    if result.verified is not True:
+        return ""
     shot = next((path for path in result.artifacts if path.suffix == ".png"), None)
     if shot is None or not shot.is_file():
         return ""
     data = base64.b64encode(shot.read_bytes()).decode("ascii")
     return (
-        f'<figure class="shot"><img src="data:image/png;base64,{data}" alt="Confirmation screenshot">'
-        "<figcaption>Intake confirmation</figcaption></figure>"
+        f'<figure class="shot"><img src="data:image/png;base64,{data}" alt="Verified local intake ID">'
+        "<figcaption>Verified local intake ID</figcaption></figure>"
     )
 
 
 def _verification_badge(result: RecordResult) -> str:
     label = verification_label(result)
     return _badge(label, {"PASS": "ok", "FAIL": "bad"}.get(label, "muted"))
+
+
+def _outcome_badge(result: RecordResult) -> str:
+    tone = "bad" if result.outcome is Outcome.SUBMITTED and result.verified is not True else _OUTCOME_TONE[result.outcome]
+    return _badge(outcome_label(result), tone)
 
 
 def _badge(text: str, tone: str) -> str:

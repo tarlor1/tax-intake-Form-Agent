@@ -1,12 +1,10 @@
 # Local API authentication
 
-The companion has **no user login, accounts, passwords, or roles**. Its authentication check is an automatically handled, per-launch token between the frontend and the local Python API. It does not identify a person.
-
-The app runs locally and serves the compiled frontend through FastAPI. It is not a public multi-user service.
+The loopback companion uses a per-launch token between its frontend and local API. The token is not a login and does not identify a person. An enrolled companion authenticates to the firm's protected service separately using an individual SSO token supplied to the Python process.
 
 ## Purpose
 
-A port tells a caller where to connect. It does not establish permission to read documents, change saved data, request external extraction, or control Playwright.
+A port does not establish permission to access originals, upload files, or record review decisions.
 
 An unrelated website open in the browser can attempt requests to localhost. Browser cross-origin restrictions block many interactions, but not every kind of request. The backend checks Host and Origin itself, then requires the frontend's token for API calls. The token is defense in depth if another boundary is missed or regresses. It is not a substitute for user authentication in a hosted application.
 
@@ -39,24 +37,20 @@ The backend generates a fresh random token when its application instance starts.
 
 After restarting the backend, refresh the frontend to obtain its new token. The launcher serves the compiled frontend and API from one origin using the configured data directory.
 
-An old tab can continue using the previous token while a newly opened tab uses the current token, producing alternating successful requests and 401 responses in the server log. Unauthorized uploads fail for the same reason; this is unrelated to the Gemini key.
+An older tab may keep sending the previous token, producing alternating successes and 401 responses. On 401 the frontend cancels the active stream and requests and offers **Reload workspace**. Reload obtains a current token; it does not replay mutations or prove that a native return was closed. Uncommitted files must be selected again.
 
-On a 401, the frontend stops making API calls and unmounts the active workspace, cancelling its polling. It displays **Session expired — reload this page** and a **Reload workspace** button. Reloading obtains a current token; failed mutations are not automatically replayed. Saved documents remain on disk, but files that never uploaded must be selected again.
+After rebuilding the frontend, restart the backend and reopen its printed address to load current assets. Do not disable authentication, edit tokens, or change the database to fix a stale local browser session.
 
-After restarting the server, reload or close every older workspace tab and open the address printed by the launcher. If the frontend was rebuilt, restart the backend first so its HTML references the current built assets. Do not disable authentication, edit tokens manually, change the database, or replace the Gemini key to resolve a stale local session.
-
-`GEMINI_API_KEY` is a different credential. It stays server-side and is not included in the frontend HTML or sent to the intake website. Never place it in a frontend environment variable: frontend build tools can expose those values to browser code.
-
-The independently controlled intake browser receives neither the companion token nor the Gemini key.
+The evidence stream uses `fetch` with the same header and a separate opaque review-session ID header. It does not include document text or field values. The firm SSO token, provider credentials, and native tool permissions are not included in the evidence HTML, a URL, or an observer message.
 
 ## Limits
 
 This protects a local API boundary; it does not authenticate individual staff members. A local program or person with access to the computer can request the public frontend and obtain the token. The check therefore does not protect against local malware, another untrusted OS user, browser compromise, or same-origin script injection.
 
-SQLite is not encrypted by this mechanism. Network deployment or multi-user access would require a separate access-control design, transport security, storage controls, and appropriate authorization. None of those features are implied by the current token check.
+Without firm enrollment, the launcher accepts uploads into a local inbox. `--inspect-archive` opens the historical SQLite archive read-only instead. Access depends on workstation isolation and OS file permissions. Neither storage mode is encrypted by the loopback token. Keep the backend bound to loopback and use a firm-approved protected workspace for sensitive documents.
 
 ## Content Security Policy
 
 The app keeps `script-src 'self'` without `unsafe-eval`. Browser API schemas configure Zod with `jitless: true` before constructing object schemas; this disables its eval-based capability probe and runtime parser compilation without disabling validation.
 
-Browser regressions listen for `securitypolicyviolation` events while exercising native Chromium PDF/TXT drops, API validation, and PDF/text evidence rendering. Do not add `unsafe-eval` merely to silence a dependency's capability probe.
+The API regression checks the no-iframe policy; the Chromium regression exercises PDF and TXT rendering and file uploads under that policy. Do not add `unsafe-eval` to silence a dependency's capability probe.

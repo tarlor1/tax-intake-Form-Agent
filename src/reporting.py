@@ -1,4 +1,4 @@
-"""Step 7: summarize a run as Markdown (outputs/run_report.md); report_pdf.py renders the PDF."""
+"""Summarize a portfolio run as Markdown; report_pdf.py renders the PDF."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .config import OnlineProvider
 from .models import Outcome, RecordResult
 from .redaction import describe_redactions
 
@@ -23,11 +24,19 @@ class RunSummary:
     errors: int
     duration_s: float
     redacted: int = 0  # records whose email contained an SSN/ITIN or bank number
+    checklist_failures: int = 0
 
     @property
     def needs_attention(self) -> bool:
         """True when something went wrong technically (not just a normal business outcome)."""
-        return self.failed > 0 or self.errors > 0
+        return bool(self.failed or self.checklist_failures or self.errors)
+
+    @property
+    def attention_detail(self) -> str:
+        detail = f"{self.failed} verification failure(s), {self.errors} error(s)"
+        if self.checklist_failures:
+            detail += f", {self.checklist_failures} checklist failure(s)"
+        return detail + "."
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,26 @@ class RunInfo:
     ai_engine: str
     browser_mode: str
     ai_usage: str | None = None
+    online_provider: OnlineProvider | None = None
+    custom_inputs: bool = False
+
+    @property
+    def input_source(self) -> str:
+        if self.online_provider:
+            return "Verified bundled synthetic samples"
+        return "Custom input folder" if self.custom_inputs else "Default input folder"
+
+    @property
+    def disclosure(self) -> str:
+        if self.online_provider:
+            provider = "Gemini" if self.online_provider == "gemini" else "Claude"
+            processing = f"Online AI processing via {provider} was authorized for verified bundled synthetic data."
+        else:
+            processing = "All intake processing ran locally. No external AI requests were made."
+        return (
+            f"{processing} No client messages were sent or tax returns filed. "
+            "Verified intakes were recorded in the temporary local demo store. Drafts require human review."
+        )
 
 
 def summarize(results: Sequence[RecordResult], duration_s: float) -> RunSummary:
@@ -51,6 +80,7 @@ def summarize(results: Sequence[RecordResult], duration_s: float) -> RunSummary:
         errors=outcomes[Outcome.ERROR],
         duration_s=duration_s,
         redacted=sum(bool(result.redacted) for result in results),
+        checklist_failures=sum(result.verified is True and result.checklist_failed for result in submitted),
     )
 
 
@@ -67,6 +97,12 @@ def verification_label(result: RecordResult) -> str:
     return "PASS" if result.verified else "FAIL"
 
 
+def outcome_label(result: RecordResult) -> str:
+    if result.outcome is Outcome.SUBMITTED and result.verified is not True:
+        return "Submission unverified"
+    return result.outcome.value
+
+
 def render_report(results: Sequence[RecordResult], summary: RunSummary, info: RunInfo, report_dir: Path) -> str:
     lines = [
         "# Tax intake automation run report",
@@ -76,6 +112,7 @@ def render_report(results: Sequence[RecordResult], summary: RunSummary, info: Ru
         f"| Run started | {info.started_at:%Y-%m-%d %H:%M:%S} |",
         f"| Duration | {format_duration(summary.duration_s)} |",
         f"| AI engine | {_cell(info.ai_engine)} |",
+        f"| Input source | {info.input_source} |",
     ]
     if info.ai_usage:
         lines.append(f"| AI usage | {_cell(info.ai_usage)} |")
@@ -87,9 +124,10 @@ def render_report(results: Sequence[RecordResult], summary: RunSummary, info: Ru
         "| Metric | Count |",
         "|---|---:|",
         f"| Records processed | {summary.processed} |",
-        f"| Submitted to intake form | {summary.submitted} |",
+        f"| Intake submission attempts | {summary.submitted} |",
         f"| Verification PASS | {summary.passed} |",
         f"| Verification FAIL | {summary.failed} |",
+        f"| Document checklist failures after verified intake | {summary.checklist_failures} |",
         f"| Held for client follow-up (missing information) | {summary.follow_ups} |",
         f"| Flagged for human review (invalid AI output) | {summary.needs_review} |",
         f"| Errors | {summary.errors} |",
@@ -101,6 +139,7 @@ def render_report(results: Sequence[RecordResult], summary: RunSummary, info: Ru
 
     if not results:
         lines += ["No intake emails were found.", ""]
+        lines.extend(["---", f"*{info.disclosure}*", ""])
         return "\n".join(lines)
 
     lines += [
@@ -120,7 +159,7 @@ def render_report(results: Sequence[RecordResult], summary: RunSummary, info: Ru
                     _cell(record.full_name if record and record.full_name else "-"),
                     str(record.tax_year) if record and record.tax_year else "-",
                     record.urgency.level.capitalize() if record else "-",
-                    result.outcome.value,
+                    outcome_label(result),
                     result.intake_id or "-",
                     verification_label(result),
                     format_duration(result.duration_s),
@@ -137,8 +176,7 @@ def render_report(results: Sequence[RecordResult], summary: RunSummary, info: Ru
         lines += ["## Next steps for staff", "", *(f"- {step}" for step in steps), ""]
     lines += [
         "---",
-        "*Demo run on fictional data. Nothing was sent to any client or external system; every draft "
-        "requires human review.*",
+        f"*{info.disclosure}*",
         "",
     ]
     return "\n".join(lines)
@@ -152,7 +190,7 @@ def write_report(path: Path, content: str) -> Path:
 
 def _status_line(summary: RunSummary) -> str:
     if summary.needs_attention:
-        return f"**Attention needed:** {summary.failed} verification failure(s), {summary.errors} error(s)."
+        return f"**Attention needed:** {summary.attention_detail}"
     if summary.submitted:
         return "**All submitted records verified.**"
     return "**No records were submitted.**"
@@ -160,13 +198,15 @@ def _status_line(summary: RunSummary) -> str:
 
 def _record_details(number: int, result: RecordResult, report_dir: Path) -> list[str]:
     record = result.extraction
-    outcome = result.outcome.value
+    outcome = outcome_label(result)
     if result.outcome is Outcome.SUBMITTED:
         outcome += f" · verification **{verification_label(result)}**"
         if result.verification_detail:
             outcome += f": {result.verification_detail}"
 
     lines = [f"### {number}. {result.source_file}", "", f"- **Outcome:** {outcome}"]
+    if result.checklist_failed:
+        lines.append("- **Document checklist:** Draft failed after verified submission.")
     if record:
         lines += [
             f"- **Urgency:** {record.urgency.level.capitalize()} · {record.urgency.reason}",
@@ -186,8 +226,9 @@ def _record_details(number: int, result: RecordResult, report_dir: Path) -> list
         lines.append(f"- **Redacted before AI:** {describe_redactions(result.redacted)}")
     if result.extraction_attempts:
         lines.append(f"- **Extraction attempts:** {result.extraction_attempts}")
-    if result.artifacts:
-        links = ", ".join(f"[{path.name}]({_relative(path, report_dir)})" for path in result.artifacts)
+    artifacts = [path for path in result.artifacts if path.suffix.lower() != ".png" or result.verified is True]
+    if artifacts:
+        links = ", ".join(f"[{path.name}]({_relative(path, report_dir)})" for path in artifacts)
         lines.append(f"- **Artifacts:** {links}")
     if result.error:
         lines.append(f"- **Error:** {result.error}")
@@ -199,8 +240,10 @@ def next_steps(summary: RunSummary) -> list[str]:
     steps = []
     if summary.follow_ups:
         steps.append(f"Review and send {summary.follow_ups} follow-up draft(s) in followups/.")
-    if summary.passed:
-        steps.append(f"Preparer review of {summary.passed} document checklist draft(s) in checklists/.")
+    if checklists := summary.passed - summary.checklist_failures:
+        steps.append(f"Preparer review of {checklists} document checklist draft(s) in checklists/.")
+    if summary.checklist_failures:
+        steps.append(f"Prepare {summary.checklist_failures} missing document checklist(s) for the verified intakes.")
     if summary.redacted:
         steps.append(
             f"{summary.redacted} client(s) emailed an SSN/ITIN or bank number (redacted before AI). "
@@ -209,7 +252,7 @@ def next_steps(summary: RunSummary) -> list[str]:
     if summary.needs_review:
         steps.append(f"Complete {summary.needs_review} intake(s) by hand; details in needs_review/.")
     if summary.needs_attention:
-        steps.append("Investigate failures and errors above; full detail is in the run log under logs/.")
+        steps.append("Investigate failures and errors above; see the run log under logs/.")
     return steps
 
 

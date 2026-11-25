@@ -1,8 +1,8 @@
-import { createFileRoute, notFound } from '@tanstack/react-router';
+import { createFileRoute, notFound, useRouter, useRouterState } from '@tanstack/react-router';
 import { z } from 'zod';
 import { api } from '../lib/api';
 import { returnSearchSchema } from '../lib/apiSchemas';
-import ReviewWorkspace from '../components/review/ReviewWorkspace';
+import EvidenceWorkspace from '../components/review/EvidenceWorkspace';
 
 const routeParamsSchema = z.object({
   clientId: z.string().min(1).max(150),
@@ -25,34 +25,39 @@ export const Route = createFileRoute('/clients_/$clientId/returns/$taxYear')({
     if (!parsed.success) throw notFound();
     return parsed.data;
   },
-  loaderDeps: ({ search }) => ({ field: search.field }),
+  loaderDeps: ({ search }) => ({ revision: search.revision }),
   loader: async ({ params, deps, abortController }) => {
-    const summaries = await api.returns(abortController.signal);
+    const signal = abortController.signal;
+    const summaries = await api.returns(signal);
     const matches = summaries.filter(
-      item => item.clientId === params.clientId && String(item.taxYear) === params.taxYear,
+      entry => entry.clientId === params.clientId && String(entry.taxYear) === params.taxYear,
     );
     if (matches.length !== 1) throw notFound();
 
-    const summary = matches[0];
-    const detail = await api.detail(summary.id, abortController.signal);
-    if (detail.clientId !== params.clientId || String(detail.taxYear) !== params.taxYear)
-      throw notFound();
-    if (
-      deps.field &&
-      !detail.fields.some(field => field.id === deps.field) &&
-      !detail.legacyFields.some(field => field.id === deps.field)
-    ) {
-      throw notFound();
-    }
-
-    return { detail, years: summaries.filter(item => item.clientId === params.clientId) };
+    const [{ id }] = matches;
+    const [detail, jobs] = await Promise.all([api.evidence(id, deps.revision, signal), api.jobs(id, signal)]);
+    if (detail.clientId !== params.clientId || String(detail.taxYear) !== params.taxYear) throw notFound();
+    return { detail, jobs };
   },
-  staleTime: 0,
+  staleTime: Infinity,
   component: ReturnWorkspace,
 });
 
 function ReturnWorkspace() {
-  const { detail, years } = Route.useLoaderData();
+  const { detail, jobs } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const router = useRouter();
+  useRouterState({ select: state => state.location });
+  const navigation = (window as Window & { navigation?: { canGoForward: boolean } }).navigation;
 
-  return <ReviewWorkspace key={detail.id} initialDetail={detail} years={years} />;
+  return (
+    <EvidenceWorkspace key={detail.id} detail={detail} search={search} jobs={jobs}
+      refresh={async () => { await router.invalidate({ sync: true }); }}
+      navigateView={async (view, replace) => { await navigate({ search: view, replace, resetScroll: false }); }}
+      previous={() => router.history.back()}
+      next={() => router.history.forward()}
+      canGoBack={router.history.canGoBack()}
+      canGoForward={navigation?.canGoForward ?? true} />
+  );
 }

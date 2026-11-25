@@ -7,7 +7,8 @@ import io
 import pytest
 from PIL import Image
 
-from review_fixtures import INDIVIDUAL_ID, PRIOR_YEAR_ID, corrected_source, seeded_store, source
+from review_fixtures import INDIVIDUAL_ID, PRIOR_YEAR_ID, corrected_source, seeded_store
+from src.sigma_demo.pdf import source
 from src.review_store import ReviewError, ReviewStore
 
 

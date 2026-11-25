@@ -5,14 +5,17 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { getRouteApi, Link, useRouter } from '@tanstack/react-router';
 import { dateLabel, type ReturnSummary } from '../../lib/api';
-import DocumentInbox from '../intake/DocumentInbox';
+import type { BatchFile } from '@/lib/apiSchemas';
+import DocumentInbox, { SavedDocumentWorkspaces } from '../intake/DocumentInbox';
 import { Progress } from '../review/ReviewStatus';
 import { useDocumentInbox } from '@/hooks/useDocumentInbox';
 
 const queueRoute = getRouteApi('/clients');
 
-export default function ClientQueue() {
-  const returns = queueRoute.useLoaderData();
+export default function ClientQueue({ returns, openPractice }: {
+  returns: ReturnSummary[];
+  openPractice: (batchId: string, file: BatchFile) => void;
+}) {
   const search = queueRoute.useSearch();
   const navigate = queueRoute.useNavigate();
   const router = useRouter();
@@ -21,7 +24,13 @@ export default function ClientQueue() {
   });
 
   const query = (search.q ?? '').trim().toLocaleLowerCase();
-  const years = [...new Set(returns.map(item => item.taxYear))].sort((a, b) => b - a);
+  const yearSet = new Set(returns.map(item => item.taxYear));
+  for (const batch of inbox.batches) {
+    for (const file of batch.files) {
+      if (file.state === 'uploaded' && file.assignment) yearSet.add(file.assignment.taxYear);
+    }
+  }
+  const years = [...yearSet].sort((a, b) => b - a);
   const filtered = returns.filter(
     item =>
       (!query ||
@@ -41,7 +50,6 @@ export default function ClientQueue() {
 
   return (
     <main
-      {...inbox.getRootProps({ role: 'main' })}
       className="queue-page mx-auto min-h-[calc(100vh-185px)] max-w-[1280px] px-10 pt-[58px] pb-[76px] max-[980px]:px-7 max-[980px]:pt-[42px] max-[980px]:pb-[60px] max-[660px]:px-5 max-[660px]:pt-8 max-[660px]:pb-[45px]"
       id="main-content"
     >
@@ -49,39 +57,42 @@ export default function ClientQueue() {
         <div>
           <h1 className="text-3xl font-semibold">Clients</h1>
         </div>
-        <div className="queue-stats flex gap-[35px] pb-2 max-[660px]:w-full max-[660px]:justify-between max-[660px]:gap-[15px] [&>div]:flex [&>div]:flex-col [&>div]:border-l [&>div]:border-border [&>div]:pl-[25px] max-[660px]:[&>div]:pl-[15px] [&_strong]:text-[32px] [&_strong]:leading-tight [&_strong]:font-medium [&_strong]:tracking-[-1px] max-[660px]:[&_strong]:text-[27px] [&_span]:mt-[7px] [&_span]:text-[11px] [&_span]:whitespace-nowrap [&_span]:text-muted-foreground max-[660px]:[&_span]:text-[10px]">
-          <div>
-            <strong>{clients.size}</strong>
-            <span>matching clients</span>
+        {returns.length > 0 && (
+          <div className="queue-stats flex gap-[35px] pb-2 max-[660px]:w-full max-[660px]:justify-between max-[660px]:gap-[15px] [&>div]:flex [&>div]:flex-col [&>div]:border-l [&>div]:border-border [&>div]:pl-[25px] max-[660px]:[&>div]:pl-[15px] [&_strong]:text-[32px] [&_strong]:leading-tight [&_strong]:font-medium [&_strong]:tracking-[-1px] max-[660px]:[&_strong]:text-[27px] [&_span]:mt-[7px] [&_span]:text-[11px] [&_span]:whitespace-nowrap [&_span]:text-muted-foreground max-[660px]:[&_span]:text-[10px]">
+            <div>
+              <strong>{clients.size}</strong>
+              <span>matching return clients</span>
+            </div>
+            <div>
+              <strong>{populated}</strong>
+              <span>fields populated</span>
+            </div>
+            <div>
+              <strong>{conflicts}</strong>
+              <span>source conflicts</span>
+            </div>
           </div>
-          <div>
-            <strong>{populated}</strong>
-            <span>fields populated</span>
-          </div>
-          <div>
-            <strong>{conflicts}</strong>
-            <span>source conflicts</span>
-          </div>
-        </div>
+        )}
       </div>
 
-      <DocumentInbox returns={returns} inbox={inbox} />
+      <DocumentInbox inbox={inbox} />
 
-      <section aria-labelledby="queue-title">
+      <section className="mt-8" aria-labelledby="queue-title">
         <div className="mb-[18px] flex items-center justify-between gap-3 max-[720px]:flex-col max-[720px]:items-start [&_h2]:text-base [&_h2]:font-semibold">
           <h2 id="queue-title">Saved workspaces</h2>
-          <span className="text-muted-foreground" role="status">
-            {filtered.length} of {returns.length} saved tax-year workspaces · {clients.size}{' '}
-            matching clients
-          </span>
+          {returns.length > 0 && (
+            <span className="text-muted-foreground" role="status">
+              {filtered.length} of {returns.length} saved returns
+            </span>
+          )}
         </div>
         <div className="queue-filters mb-5 grid grid-cols-[minmax(0,1fr)_minmax(160px,220px)_auto] items-end gap-3.5 max-[660px]:grid-cols-1 [&_label]:mb-1.5 [&_label]:block [&_label]:text-xs [&_label]:font-semibold" role="search" aria-label="Filter saved clients">
           <div>
-            <label htmlFor="client-search">Search clients</label>
+            <label htmlFor="client-search">Search saved workspaces</label>
             <Input
               id="client-search"
               type="search"
-              placeholder="Client name or ID"
+              placeholder="Client, filename or form type"
               value={search.q ?? ''}
               onChange={event => {
                 const q = event.target.value;
@@ -105,7 +116,7 @@ export default function ClientQueue() {
             >
               <option value="">All years</option>
               {search.year !== undefined && !years.includes(search.year) && (
-                <option value={search.year}>{search.year} · no saved returns</option>
+                <option value={search.year}>{search.year} · no saved workspaces</option>
               )}
               {years.map(year => (
                 <option key={year} value={year}>
@@ -121,25 +132,25 @@ export default function ClientQueue() {
             Clear filters
           </Button>
         </div>
-        {returns.length === 0 ? (
-          <div className="loading-panel rounded-lg border border-border bg-card px-6 py-[50px] text-muted-foreground [&_button]:mt-3">
-            No saved client returns yet. Upload documents above to identify clients and tax years.
+        <SavedDocumentWorkspaces inbox={inbox} query={query} year={search.year} openPractice={openPractice} />
+        {returns.length === 0 && !inbox.settings?.requiresClient && (
+          <div className="loading-panel rounded-lg border border-border bg-card px-6 py-[50px] text-muted-foreground">
+            No saved client returns yet.
           </div>
-        ) : (
-          filtered.length === 0 && (
-            <div className="loading-panel rounded-lg border border-border bg-card px-6 py-[50px] text-muted-foreground [&_button]:mt-3">
-              <p>
-                No client tax-year workspaces match these filters. Your saved records are unchanged.
-              </p>
-              <Button
-                variant="link"
-                className="h-auto p-0 text-xs"
-                onClick={() => void navigate({ search: {}, resetScroll: false })}
-              >
-                Clear filters to show all saved returns
-              </Button>
-            </div>
-          )
+        )}
+        {returns.length > 0 && filtered.length === 0 && (
+          <div className="loading-panel rounded-lg border border-border bg-card px-6 py-[50px] text-muted-foreground [&_button]:mt-3">
+            <p>
+              No client tax-year workspaces match these filters. Your saved records are unchanged.
+            </p>
+            <Button
+              variant="link"
+              className="h-auto p-0 text-xs"
+              onClick={() => void navigate({ search: {}, resetScroll: false })}
+            >
+              Clear filters to show all saved returns
+            </Button>
+          </div>
         )}
         <div className="client-grid grid grid-cols-2 gap-6 max-[660px]:grid-cols-1 max-[660px]:gap-[17px]">
           {[...clients.entries()].map(([clientId, clientReturns]) => {
@@ -173,8 +184,9 @@ export default function ClientQueue() {
                   >
                     <div className="year-return-heading flex items-center justify-between gap-3 [&>strong]:text-[17px] [&>strong]:tracking-[-.35px] [&>span]:text-[10px] [&>span]:text-muted-foreground">
                       <strong>Tax year {item.taxYear}</strong>
-                      <span>Client intake</span>
+                      <span>{item.destination}</span>
                     </div>
+                    {item.reviewRequired && <Badge variant="secondary">Review required – new document</Badge>}
                     <Progress
                       filled={item.totalFields - item.missingFields}
                       total={item.totalFields}

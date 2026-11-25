@@ -32,6 +32,12 @@ def test_bank_numbers_are_redacted_but_labels_kept():
     assert result.removed == {BANK: 2}
 
 
+def test_a_labeled_account_is_masked_as_one_value_even_if_part_looks_like_an_ssn():
+    result = redact_sensitive_numbers("Account number: 123-45-6789-0123")
+    assert result.text == "Account number: [REDACTED bank account/routing number]"
+    assert result.removed == {BANK: 1}
+
+
 def test_intake_details_are_left_alone():
     text = (
         "Driver's license: NC 000184529311, expires 07/22/2031\n"

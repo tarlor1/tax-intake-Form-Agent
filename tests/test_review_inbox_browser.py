@@ -1,231 +1,300 @@
-"""Document drops, visible progress, and explicit extraction consent in the real UI."""
+"""Exercise native focus → observer → private pipe → authenticated SSE → evidence UI."""
 
-from __future__ import annotations
-
-import re
-import socket
-import threading
-import time
-from pathlib import Path
+import asyncio
+from datetime import datetime, timezone
+import os
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
-import uvicorn
-from playwright.sync_api import expect, sync_playwright
-from starlette.concurrency import run_in_threadpool
+from playwright.async_api import async_playwright, expect
 
-from review_fixtures import source
-from src.review_api import create_app
+from practice_inbox import PracticeInbox
+from src.sigma_demo.pdf import source as synthetic_pdf
+from review_companion_practice import CLIENT, PRIOR, RETURN, REVISION, ROOT, TOKEN, PracticeCompanion, run_companion
+from sigma_practice_uploads import PracticeObjects
+from src.sigma_demo.native import practice_web_profile
+from src.sigma_demo.target import sigma_practice_target
+from src.preparation.batches import BatchIntake, ClassifiedUpload, CommittedBatchSource, IngestScope
+from src.preparation.dispatch import ExtractionTicket, PreparedExtraction, UploadDispatch
+from src.preparation.review_events import NativeAddress
+from test_preparation_batches import EXTRACTION
+from test_preparation_web_navigation import IDENTITY, chromium_executable
+from test_preparation_web_observer import _add_w2, _create_draft
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-AUTH = {"X-Review-Token": "inbox-browser-test"}
-
-
-@pytest.fixture
-def inbox_server(tmp_path, monkeypatch):
-    ui = PROJECT_ROOT / "review_ui" / "dist"
-    if not (ui / "index.html").is_file():
-        pytest.skip("Build review_ui before running the inbox browser regression")
-
-    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-test-key-never-sent")
-    monkeypatch.setenv("GOOGLE_API_KEY", "")
-    upload_release = threading.Event()
-    extraction_release = threading.Event()
-
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        app = create_app(
-            tmp_path / "workspace",
-            ui,
-            port=port,
-            token=AUTH["X-Review-Token"],
-        )
-
-        @app.middleware("http")
-        async def hold_upload(request, call_next):
-            if request.method == "POST" and request.url.path == "/api/review/intake/documents":
-                if not await run_in_threadpool(upload_release.wait, 15):
-                    raise RuntimeError("Browser test did not release the upload")
-            return await call_next(request)
-
-        def fail_extraction(_pages):
-            if not extraction_release.wait(15):
-                raise RuntimeError("Browser test did not release extraction")
-            raise RuntimeError("Synthetic extraction failure; no external request was sent.")
-
-        # Replace only the external model boundary, never the upload or review application.
-        monkeypatch.setattr(app.state.intake, "_call_gemini", fail_extraction)
-        server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", proxy_headers=False)
-        )
-        thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
-        thread.start()
-
-        try:
-            deadline = time.monotonic() + 15
-            while not server.started:
-                if not thread.is_alive() or time.monotonic() >= deadline:
-                    pytest.fail("Isolated inbox server did not start")
-                threading.Event().wait(0.02)
-
-            yield app, f"http://127.0.0.1:{port}", upload_release, extraction_release
-        finally:
-            upload_release.set()
-            extraction_release.set()
-            server.should_exit = True
-            thread.join(timeout=20)
-            assert not thread.is_alive(), "Isolated inbox server did not stop"
+pytestmark = pytest.mark.skipif(os.name == 'nt', reason='Synthetic observer transport uses a Unix private pipe')
 
 
-@pytest.mark.parametrize("drop_target", [".document-dropzone strong", "h1"])
-def test_pdf_and_text_drops_show_progress_and_require_consent(
-    inbox_server, tmp_path, monkeypatch, drop_target,
-):
-    app, origin, upload_release, extraction_release = inbox_server
-    _, pdf, _ = source("inbox-contact", "Synthetic contact", ["Client: Jordan Example", "Tax year: 2025"])
-    files = []
-    for filename, content in (
-        ("contact.pdf", pdf),
-        ("contact.txt", b"Client: Jordan Example\nTax year: 2025\n"),
-        ("unsupported.jpg", b"image"),
-    ):
-        path = tmp_path / filename
-        path.write_bytes(content)
-        files.append(str(path))
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1440, "height": 1100})
-        page.add_init_script("""
-            window.__cspViolations = [];
-            document.addEventListener('securitypolicyviolation', event => {
-                window.__cspViolations.push({
-                    directive: event.effectiveDirective,
-                    blockedURI: event.blockedURI,
-                });
-            });
-        """)
-        page_errors = []
-        page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.goto(origin + "/clients")
-        readiness = page.locator("#extraction-readiness")
-        extract = page.get_by_role("button", name="Extract uploaded documents", exact=True)
-        expect(readiness).to_contain_text("No files are waiting")
-        expect(extract).to_be_disabled()
-
-        prevented = page.locator("header").first.evaluate(
-            """element => {
-                const transfer = new DataTransfer();
-                transfer.items.add(new File(['outside'], 'outside.txt', { type: 'text/plain' }));
-                const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer });
-                element.dispatchEvent(event);
-                return event.defaultPrevented;
-            }"""
-        )
-        assert prevented, "Dropping outside the inbox must not navigate to the file"
-
-        target = page.locator(drop_target).bounding_box()
-        assert target is not None
-        drag = {
-            "x": target["x"] + target["width"] / 2,
-            "y": target["y"] + target["height"] / 2,
-            "data": {"items": [], "files": files, "dragOperationsMask": 1},
-        }
-        cdp = page.context.new_cdp_session(page)
-        for event_type in ("dragEnter", "dragOver", "drop"):
-            cdp.send("Input.dispatchDragEvent", {"type": event_type, **drag})
-        upload_progress = page.get_by_role("progressbar", name="Uploading and validating documents")
-        expect(upload_progress).to_be_visible()
-        assert upload_progress.get_attribute("aria-valuenow") is None
-        expect(readiness).to_contain_text("finish uploading")
-        expect(extract).to_be_disabled()
-
-        upload_release.set()
-        expect(page.get_by_text("Saved locally · extraction needed", exact=True)).to_have_count(2)
-        expect(upload_progress).to_have_count(0)
-        expect(readiness).to_contain_text("Check the approval box")
-        expect(extract).to_be_disabled()
-        rejected = page.locator("li").filter(has=page.get_by_text("unsupported.jpg", exact=True))
-        expect(rejected.get_by_role("alert")).to_be_visible()
-        saved = page.request.get(origin + "/api/review/intake", headers=AUTH).json()
-        assert {document["filename"] for document in saved["documents"]} == {"contact.pdf", "contact.txt"}
-        assert all(document["status"] == "uploaded" for document in saved["documents"])
-        assert app.state.store.list_returns() == []
-        assert page.url == origin + "/clients"
-
-        page.get_by_role("checkbox", name=re.compile("I approve sending")).check()
-        expect(extract).to_be_enabled()
-        extract.click()
-        extraction_progress = page.get_by_role("progressbar", name="Extracting uploaded documents")
-        expect(extraction_progress).to_be_visible()
-        assert extraction_progress.get_attribute("aria-valuenow") is None
-        desktop_image = tmp_path / "inbox-desktop.png"
-        page.screenshot(path=str(desktop_image), full_page=True)
-        print(f"Inbox desktop screenshot: {desktop_image}")
-
-        extraction_release.set()
-        expect(page.get_by_text("Extraction failed", exact=True)).to_have_count(2, timeout=15000)
-        expect(extraction_progress).to_have_count(0)
-        expect(page.get_by_role("button", name="Retry extraction", exact=True)).to_have_count(2)
-        for filename in ("contact.pdf", "contact.txt"):
-            failed_file = page.locator("li").filter(has=page.get_by_text(filename, exact=True))
-            expect(failed_file.get_by_role("alert")).to_be_visible()
-
-        monkeypatch.setenv("GEMINI_API_KEY", "")
-        expect(readiness).to_contain_text("Set GEMINI_API_KEY", timeout=10000)
-        expect(extract).to_be_disabled()
-        page.set_viewport_size({"width": 390, "height": 844})
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        mobile_image = tmp_path / "inbox-mobile.png"
-        page.screenshot(path=str(mobile_image), full_page=True)
-        print(f"Inbox mobile screenshot: {mobile_image}")
-        assert page_errors == []
-        assert page.evaluate("window.__cspViolations") == []
-        browser.close()
+def _browser_options():
+    options = {'executable_path': chromium_executable()}
+    display = os.environ.get('SIGMA_TEST_DISPLAY')
+    if display:
+        options['headless'] = False
+        options['env'] = {**os.environ, 'DISPLAY': display, 'WAYLAND_DISPLAY': ''}
+        options['args'] = ['--ozone-platform=x11']
+    return options
 
 
-def test_expired_session_stops_polling_and_reload_restores_upload(inbox_server, tmp_path):
-    app, origin, upload_release, _ = inbox_server
-    stale_requests = []
+@pytest.fixture(autouse=True)
+def built_frontend():
+    if not (ROOT / 'review_ui' / 'dist' / 'index.html').is_file():
+        pytest.skip('Build review_ui before the companion browser regression')
 
-    def send_stale_token(route):
-        stale_requests.append(route.request.url)
-        route.continue_(headers={**route.request.headers, "x-review-token": "previous-server-session"})
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.clock.install()
-        page.goto(origin + "/clients")
-        expect(page.locator("#extraction-readiness")).to_contain_text("No files are waiting")
+async def assert_view(page, field, document, citation, page_number):
+    await page.wait_for_url(lambda url: all(
+        parse_qs(urlsplit(url).query).get(key, [None])[0] == expected
+        for key, expected in {'field': field, 'document': document, 'citation': citation, 'page': page_number}.items()
+    ))
 
-        # The real backend must reject this old-session header; no response is mocked.
-        page.route("**/api/review/intake", send_stale_token)
-        expect(page.get_by_role("alert")).to_contain_text("Session expired", timeout=10000)
-        expect(page.get_by_role("button", name="Select files", exact=True)).to_have_count(0)
-        rejected_count = len(stale_requests)
-        assert rejected_count == 1
-        page.clock.fast_forward(10000)
-        assert len(stale_requests) == rejected_count
 
-        image = tmp_path / "expired-session.png"
-        page.screenshot(path=str(image), full_page=True)
-        print(f"Expired session screenshot: {image}")
+def test_source_history_keeps_native_focus_and_skips_duplicate_notifications(tmp_path):
+    async def exercise(native_origin):
+        backend = PracticeCompanion(tmp_path)
+        backend.native_profile = practice_web_profile(native_origin)
+        options = _browser_options()
+        async with async_playwright() as playwright:
+            seed = await playwright.chromium.launch(executable_path=options['executable_path'])
+            try:
+                page = await seed.new_page()
+                backend.draft = await _create_draft(page, native_origin, IDENTITY.client_reference)
+                row_a = await _add_w2(page, 'Employer A')
+                row_b = await _add_w2(page, 'Employer B')
+            finally:
+                await seed.close()
 
-        page.unroute("**/api/review/intake", send_stale_token)
-        page.get_by_role("button", name="Reload workspace", exact=True).click()
-        expect(page.locator("#extraction-readiness")).to_contain_text("No files are waiting")
-        expect(page.get_by_role("heading", name="Clients", exact=True)).to_be_visible()
-        expect(page.get_by_role("region", name="Document inbox", exact=True)).to_be_visible()
+            backend.legal_addresses = {
+                NativeAddress('w2', row_a, 'wages'): 'wages-a',
+                NativeAddress('w2', row_b, 'wages'): 'wages-b',
+                NativeAddress('w2', row_b, 'withholding'): 'tax-b',
+            }
+            backend.browser = await playwright.chromium.launch(**options)
+            evidence_browser = await playwright.chromium.launch(**options)
+            try:
+                async with run_companion(backend) as companion:
+                    evidence = await evidence_browser.new_page()
+                    await evidence.goto(f'{companion}/clients/{CLIENT}/returns/2025?revision={REVISION}')
+                    await evidence.get_by_role('button', name='Open review').click()
+                    await expect(evidence.get_by_role('button', name='Mark reviewed')).to_be_enabled()
+                    competing = await evidence_browser.new_page()
+                    await competing.goto(f'{companion}/clients/{CLIENT}/returns/2025?revision={REVISION}')
+                    async with competing.expect_response(
+                        lambda response: response.url.endswith('/review/events') and response.status == 409,
+                    ):
+                        await competing.get_by_role('button', name='Open review').click()
+                    await expect(competing.get_by_text('Evidence is already following this review in another window.')).to_be_visible()
+                    await expect(competing.get_by_role('button', name='Mark reviewed')).to_be_disabled()
+                    assert backend.stream_requests == 2
+                    native = backend.native
+                    assert native is not None and native.context.browser is backend.browser
+                    assert evidence.context.browser is not native.context.browser
+                    assert await evidence.locator('iframe').count() == 0
+                    for employer, field, doc in (('Employer A', 'wages-a', 'doc-a'), ('Employer B', 'wages-b', 'doc-b')):
+                        await native.get_by_role('row').filter(has_text=employer).get_by_role('link').click()
+                        await native.get_by_label('Box 1 wages').click()
+                        await assert_view(evidence, field, doc, f'{doc}-citation-1', '1')
+                        await expect(evidence.get_by_role('img', name=f'{employer} original, page 1. Highlighted evidence: Box 1 wages: $100.00')).to_be_visible()
+                        if employer == 'Employer A':
+                            await native.get_by_role('link', name='Back to W-2s').click()
+                    assert backend.stream_requests == 2 and backend.detail_requests == [REVISION, REVISION]
+                    await expect(evidence.get_by_text('Source evidence only', exact=True)).to_be_visible()
+                    await expect(evidence.get_by_text('Verified after reopening', exact=True)).to_have_count(0)
+                    requests = list(backend.native_requests)
+                    await evidence.get_by_role('button', name='Employer B original, page 2, line 1').click()
+                    await assert_view(evidence, 'wages-b', 'doc-b', 'doc-b-citation-2', '2')
+                    await expect(evidence.get_by_role('img', name='Employer B original, page 2. Highlighted evidence: Corroborating wages: $100.00')).to_be_visible()
+                    await evidence.get_by_role('button', name='Next PDF page').click()
+                    await assert_view(evidence, 'wages-b', 'doc-b', 'doc-b-citation-2', '3')
+                    await expect(evidence.get_by_role('img', name='Employer B original, page 3. No evidence highlighted on this page.')).to_be_visible()
+                    await native.get_by_label('Box 1 wages').click()  # Same native field; browsing stays put.
+                    await assert_view(evidence, 'wages-b', 'doc-b', 'doc-b-citation-2', '3')
 
-        upload_release.set()
-        page.get_by_label("Select PDF or TXT documents").set_input_files({
-            "name": "after-reload.txt",
-            "mimeType": "text/plain",
-            "buffer": b"Client: Jordan Example\nTax year: 2025\n",
-        })
-        expect(page.get_by_text("Saved locally · extraction needed", exact=True)).to_be_visible()
-        saved = page.request.get(origin + "/api/review/intake", headers=AUTH).json()
-        assert {document["filename"] for document in saved["documents"]} == {"after-reload.txt"}
-        assert app.state.store.list_returns() == []
-        browser.close()
+                    for field, doc, cite, number in (
+                        ('wages-b', 'doc-b', 'doc-b-citation-2', '2'),
+                        ('wages-b', 'doc-b', 'doc-b-citation-1', '1'),
+                        ('wages-a', 'doc-a', 'doc-a-citation-1', '1'),
+                    ):
+                        await evidence.go_back()
+                        await assert_view(evidence, field, doc, cite, number)
+                        await expect(evidence.get_by_text('Active in Sigma: Employer B · Box 1 wages')).to_be_visible()
+                    for cite, number in (('doc-b-citation-1', '1'), ('doc-b-citation-2', '2'), ('doc-b-citation-2', '3')):
+                        await evidence.go_forward()
+                        await assert_view(evidence, 'wages-b', 'doc-b', cite, number)
+                    assert backend.native_requests == requests
+                    assert backend.stream_requests == 2 and backend.detail_requests == [REVISION, REVISION]
+                    await competing.close()
+                    assert await native.get_by_label('Box 1 wages').evaluate('(input) => input === document.activeElement')
+
+                    await evidence.get_by_role('button', name='Previous evidence').click()
+                    await assert_view(evidence, 'wages-b', 'doc-b', 'doc-b-citation-2', '2')
+                    await native.keyboard.press('Tab')
+                    await assert_view(evidence, 'tax-b', 'doc-text', 'text-line', None)
+                    await expect(evidence.get_by_label('Employer B withholding note, selectable original text with line numbers')).to_be_visible()
+                    await expect(evidence.get_by_role('button', name='Next evidence')).to_be_disabled()
+                    await native.get_by_label('Employer reference').click()
+                    await expect(evidence.get_by_text('Active in Sigma: No linked citation · choose evidence manually')).to_be_visible()
+                    await expect(evidence.get_by_role('region', name='Source document')).to_have_count(0)
+
+                    await evidence.get_by_role('combobox', name='Input revision', exact=True).select_option(PRIOR)
+                    await expect(evidence.get_by_role('option', name='Employer A · Box 1 wages')).to_have_count(1)
+                    await expect(evidence.get_by_role('option', name='Employer B · Box 1 wages')).to_have_count(0)
+                    await native.get_by_label('Box 1 wages').click()
+                    await assert_view(evidence, 'wages-b', 'doc-b', 'doc-b-citation-1', '1')
+                    await evidence.get_by_role('button', name='Verified page only').click()
+                    await expect(evidence.get_by_text('Page 2 verified; there is no exact highlight.')).to_be_visible()
+                    await evidence.get_by_role('button', name='No verified page').click()
+                    await expect(evidence.get_by_text('Page not verified.')).to_be_visible()
+                    backend.field_version += 1
+                    await evidence.get_by_role('button', name='Mark reviewed').click()
+                    await expect(evidence.get_by_role('alert')).to_have_text(
+                        'The evidence changed. Refresh and review the current field snapshot.'
+                    )
+                    assert backend.decisions == 0
+                    async with evidence.expect_response(
+                        lambda response: '/evidence?' in response.url and response.status == 200,
+                    ):
+                        await evidence.get_by_role('button', name='Refresh status').click()
+                    await expect(evidence.get_by_role('button', name='Mark reviewed')).to_be_enabled()
+                    await evidence.get_by_role('button', name='Mark reviewed').click()
+                    await expect(evidence.get_by_text('Marked reviewed for this input revision. Nothing was filed.')).to_be_visible()
+                    await evidence.get_by_role('button', name='Release review').click()
+                    await expect(evidence.get_by_role('alert')).to_have_text('Close the native return before releasing the reservation.')
+                    reservation = backend.active
+                    assert reservation is not None
+                    reservation.expires_at = datetime.now(timezone.utc)
+                    await evidence.reload()
+                    await evidence.get_by_role('button', name='Open review').click()
+                    await expect(evidence.get_by_text('The evidence session expired.', exact=False)).to_be_visible()
+                    await expect(evidence.get_by_role('button', name='Mark reviewed')).to_be_disabled()
+                    assert backend.active is reservation and backend.native is native and not native.is_closed()
+                    await native.close()
+                    await evidence.get_by_role('button', name='Release review').click()
+                    await expect(evidence.get_by_text('Native review released.')).to_be_visible()
+                    assert backend.stream_requests == 2
+                    assert all(method == 'GET' for method, _ in backend.native_requests)
+
+                    await evidence.reload()
+                    await expect(evidence.get_by_text('Page not verified.')).to_be_visible()
+                    assert backend.stream_requests == 2 and backend.native.is_closed()
+                    await evidence.goto(f'{companion}/clients/{CLIENT}/returns/2025?revision={REVISION}&field=wages-b&document=doc-a&version=original-one&citation=doc-b-citation-1')
+                    await expect(evidence.get_by_role('alert')).to_have_text('This evidence location is unavailable for the selected return revision.')
+                    await expect(evidence.get_by_role('region', name='Source document')).to_have_count(0)
+            finally:
+                await backend.browser.close()
+                await evidence_browser.close()
+
+    with sigma_practice_target(tmp_path / 'drafts.sqlite3') as origin:
+        asyncio.run(exercise(origin))
+
+
+def test_drop_keeps_committed_slot_and_allows_independent_retry(tmp_path, coordinator_db):
+    async def exercise():
+        other_return = 'practice-other-return'
+        with coordinator_db.transaction() as connection:
+            connection.execute("""INSERT INTO prep_returns (firm_id,return_id,profile_id,store_id,tax_year)
+                                  VALUES ('practice-firm',%s,'practice','store',2025),
+                                         ('practice-firm',%s,'practice','store',2025)""", (RETURN, other_return))
+        intake = BatchIntake(coordinator_db, PracticeObjects(tmp_path))
+        intake.install()
+        classified = {}
+        source = CommittedBatchSource(intake, lambda event, _hint: ClassifiedUpload(classified.get(event, RETURN), 'synthetic'))
+        dispatch = UploadDispatch(coordinator_db, source)
+        dispatch.install()
+        scope = IngestScope('practice-firm', 'practice-preparer', frozenset({RETURN, other_return}))
+        inbox = PracticeInbox(tmp_path, intake, scope, policy=EXTRACTION)
+        backend = PracticeCompanion(tmp_path, inbox=inbox)
+        async with run_companion(backend) as origin, async_playwright() as playwright:
+            browser = await playwright.chromium.launch(**_browser_options())
+            try:
+                page = await browser.new_page()
+                await page.goto(f'{origin}/clients')
+                await expect(page.get_by_role('button', name='Select files')).to_be_enabled()
+                slow_upload = asyncio.Event()
+                parallel_put = asyncio.Event()
+                first_put = True
+
+                async def hold_first_put(route):
+                    nonlocal first_put
+                    if first_put:
+                        first_put = False
+                        await slow_upload.wait()
+                    else:
+                        parallel_put.set()
+                    await route.continue_()
+
+                await page.route('**/api/review/intake/batches/*/files/*', hold_first_put)
+                await page.get_by_role('checkbox', name='Approve synthetic files for practice extraction.').check()
+                await page.get_by_label('Select PDF or TXT files').set_input_files([
+                    {'name': 'good.txt', 'mimeType': 'text/plain', 'buffer': b'Synthetic W-2\nBox 1: 100\n'},
+                    {'name': 'broken.pdf', 'mimeType': 'application/pdf', 'buffer': b'bad PDF'},
+                    {'name': 'missing.pdf', 'mimeType': 'application/pdf', 'buffer': b'bad PDF'},
+                ])
+                await expect(page.get_by_text('good.txt', exact=True)).to_be_visible()
+                try:
+                    await asyncio.wait_for(parallel_put.wait(), timeout=5)
+                finally:
+                    slow_upload.set()
+                await expect(page.get_by_text('good.txt', exact=True).locator('..')).to_contain_text('Committed')
+                await expect(page.get_by_text('broken.pdf', exact=True).locator('..')).to_contain_text('complete PDF')
+                (event,) = intake.committed_events()
+                assert dispatch.consume(event)
+                ticket = dispatch.begin_extraction(event, source.grant_id(event), EXTRACTION)
+                assert isinstance(ticket, ExtractionTicket)
+                assert dispatch.authorize_disclosure(ticket) == 'authorized'
+                assert dispatch.stage_extraction(ticket, PreparedExtraction(RETURN, lambda _conn: 'fixture-validated-facts'))
+                assert dispatch.settle_staged(event)
+                await expect(page.get_by_role('button', name='Extract uploaded documents')).to_have_count(0)
+                with coordinator_db.transaction() as connection:
+                    assert connection.execute(
+                        'SELECT review_required FROM prep_returns WHERE return_id=%s', (RETURN,),
+                    ).fetchone()['review_required']
+                    assert connection.execute('SELECT count(*) AS n FROM prep_jobs').fetchone()['n'] == 1
+
+                scoped = await browser.new_page()
+                await scoped.goto(f'{origin}/clients/{CLIENT}/returns/2025?revision={REVISION}')
+                await expect(scoped.get_by_text('good.txt', exact=True)).to_be_visible()
+                await expect(scoped.get_by_text('broken.pdf', exact=True)).to_have_count(0)
+                await expect(scoped.get_by_text('missing.pdf', exact=True)).to_have_count(0)
+                await expect(scoped.get_by_role('button', name='Exclude file')).to_have_count(0)
+                original_batch, = intake.list_batches(scope)
+                pending_slot = next(slot for slot in original_batch.files if slot.filename == 'broken.pdf')
+                denied = await page.request.put(
+                    f'{origin}/api/review/returns/{RETURN}/intake/batches/{original_batch.batch_id}/files/{pending_slot.slot}',
+                    data='Not independently attributed',
+                    headers={'X-Review-Token': TOKEN, 'Content-Type': 'text/plain'},
+                )
+                assert denied.status == 404
+                await scoped.get_by_label('Select PDF or TXT files').set_input_files([
+                    {'name': 'other-return.txt', 'mimeType': 'text/plain', 'buffer': b'Synthetic other client'},
+                ])
+                await expect(scoped.get_by_text('Files appear here only after the firm verifies', exact=False)).to_be_visible()
+                other_event, = set(intake.committed_events()) - {event}
+                classified[other_event] = other_return
+                assert dispatch.consume(other_event)
+                async with scoped.expect_response(lambda response: response.url.endswith(f'{RETURN}/intake/batches')):
+                    await scoped.get_by_role('button', name='Refresh verified uploads').click()
+                await expect(scoped.get_by_text('other-return.txt', exact=True)).to_have_count(0)
+                await scoped.close()
+
+                await page.reload()
+                await expect(page.get_by_text('other-return.txt', exact=True)).to_be_visible()
+                _, corrected_pdf, _ = synthetic_pdf('broken', 'Corrected synthetic PDF', ['Box 1: $100.00'])
+                broken_file = page.get_by_text('broken.pdf', exact=True).locator('..')
+                await broken_file.get_by_label('Reselect file').set_input_files({
+                    'name': 'broken.pdf', 'mimeType': 'application/pdf', 'buffer': corrected_pdf,
+                })
+                await expect(broken_file).to_contain_text('Committed')
+                await page.get_by_text('missing.pdf', exact=True).locator('..').get_by_role('button', name='Exclude file').click()
+                await expect(page.get_by_text('Upload complete', exact=True)).to_have_count(2)
+                committed = intake.committed_events()
+                assert len(committed) == 3 and event in committed
+                with coordinator_db.transaction() as connection:
+                    assert connection.execute('SELECT count(*) AS n FROM prep_jobs').fetchone()['n'] == 1
+                response = await page.request.get(f'{origin}/api/review/returns/{RETURN}/evidence')
+                assert response.status == 401
+                response = await page.request.get(f'{origin}/api/review/returns/{RETURN}/review/originals/doc-b/original-one?revision={PRIOR}',
+                                                  headers={'X-Review-Token': TOKEN})
+                assert response.status == 404
+            finally:
+                await browser.close()
+
+    asyncio.run(exercise())

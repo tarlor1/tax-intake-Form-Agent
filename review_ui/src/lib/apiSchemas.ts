@@ -5,7 +5,6 @@ z.config({ jitless: true });
 
 const identifier = z.string().min(1).max(150);
 const count = z.number().int().nonnegative();
-const revision = z.number().int().positive();
 export const rectangleSchema = z
   .tuple([
     z.number().min(0).max(1),
@@ -18,69 +17,110 @@ export const rectangleSchema = z
     'Region must fit inside the page.',
   );
 
-export const documentSchema = z.object({
+const originalReferenceSchema = z.strictObject({ documentId: identifier, versionId: identifier });
+const evidencePage = z.number().int().positive();
+const literalQuote = z.string().min(1).max(20_000);
+
+export const taxEvidenceSchema = z.discriminatedUnion('precision', [
+  z.strictObject({
+    precision: z.literal('region'),
+    original: originalReferenceSchema,
+    page: evidencePage,
+    rect: rectangleSchema,
+    quote: literalQuote,
+  }),
+  z.strictObject({
+    precision: z.literal('lines'),
+    original: originalReferenceSchema,
+    lineStart: evidencePage,
+    lineEnd: evidencePage,
+    quote: literalQuote,
+  }).refine(({ lineStart, lineEnd }) => lineStart <= lineEnd, 'Source lines must be ordered.'),
+  z.strictObject({
+    precision: z.literal('page'),
+    original: originalReferenceSchema,
+    page: evidencePage,
+  }),
+  z.strictObject({
+    precision: z.literal('document'),
+    original: originalReferenceSchema,
+  }),
+]);
+
+const evidenceDocumentSchema = z.object({
   id: identifier,
+  versionId: identifier,
   title: z.string(),
-  pageCount: z.number().int().positive(),
-  version: revision,
-  mediaType: z.enum(['application/pdf', 'text/plain']).optional(),
-  extractionStatus: z.string().optional(),
+  mediaType: z.enum(['application/pdf', 'text/plain']),
+  pageCount: z.number().int().positive().nullable(),
 });
-export const citationSchema = z.object({
-  id: identifier,
-  documentId: identifier,
-  page: z.number().int().positive(),
-  rect: rectangleSchema,
-  quote: z.string(),
-  label: z.string(),
-  lineStart: z.number().int().positive().optional(),
-  lineEnd: z.number().int().positive().optional(),
-});
-export const candidateSchema = z.object({
-  id: identifier,
-  value: z.string(),
-  citations: z.array(citationSchema),
-  provenance: z.enum(['human', 'gemini']).optional(),
-  documentId: identifier.optional(),
-  reason: z.string().optional(),
-  documentVersion: revision.optional(),
-});
-export const fieldSchema = z.object({
+const evidenceCitationSchema = z.object({ id: identifier, label: z.string(), evidence: taxEvidenceSchema });
+const evidenceCandidateSchema = z.object({
   id: identifier,
   label: z.string(),
-  section: z.string(),
-  kind: z.enum(['money', 'text', 'date', 'integer', 'select', 'multi']),
   value: z.string().nullable(),
-  revision,
-  status: z.enum(['needs_review', 'accepted', 'blocked']),
-  conflict: z.boolean(),
-  selectedCandidateId: identifier.nullable(),
-  candidates: z.array(candidateSchema),
-  citations: z.array(citationSchema),
-  dependencies: z.array(identifier),
-  derivation: z.string().nullable(),
-  correctionReason: z.string().nullable(),
-  valueOrigin: z.enum(['ai', 'source', 'preparer', 'workspace', 'calculated']).nullish(),
-  required: z.boolean().default(false),
-  options: z.array(z.object({ value: z.string(), label: z.string() })).default([]),
-  controlType: z.string().optional(),
-  min: z.union([z.number(), z.iso.date()]).optional(),
-  max: z.union([z.number(), z.iso.date()]).optional(),
+  citations: z.array(evidenceCitationSchema),
 });
-export const eventSchema = z.object({
+const evidenceFieldSchema = z.object({
   id: identifier,
-  createdAt: z.string(),
-  kind: z.string(),
-  fieldId: identifier.nullable(),
-  message: z.string(),
+  label: z.string(),
+  recordLabel: z.string(),
+  value: z.string().nullable(),
+  priorSourceValue: z.string().nullable(),
+  proposedValue: z.string().nullable(),
+  savedValue: z.string().nullable(),
+  provenance: z.enum(['source', 'preparer', 'archived', 'none']),
+  status: z.enum(['verified', 'unverified', 'conflict', 'needs_client_input']),
+  usedCitationId: identifier.nullable(),
+  candidates: z.array(evidenceCandidateSchema),
+  derivation: z.string().nullable(),
 });
+export const evidenceDetailSchema = z.object({
+  id: identifier,
+  clientId: identifier,
+  clientName: z.string(),
+  taxYear: z.number().int().min(1900).max(2200),
+  returnType: z.enum(['individual', 'business', '1120']),
+  inputRevision: identifier,
+  latestRevision: identifier,
+  revisions: z.array(z.object({ id: identifier, label: z.string() })),
+  documents: z.array(evidenceDocumentSchema),
+  fields: z.array(evidenceFieldSchema),
+  reviewAvailable: z.boolean(),
+  reviewMessage: z.string().nullable(),
+  decisionVersion: count,
+  fieldVersion: count,
+});
+export const reviewOpenedSchema = z.strictObject({
+  status: z.enum(['open', 'queued', 'recovery_required']),
+  reviewSessionId: identifier.nullable(),
+  returnId: identifier,
+  inputRevision: identifier,
+}).refine(value => (value.status !== 'queued') === (value.reviewSessionId !== null));
+export const reviewSelectionSchema = z.strictObject({
+  reviewSessionId: identifier,
+  returnId: identifier,
+  inputRevision: identifier,
+  sequence: count,
+  bindingId: identifier.nullable(),
+  status: z.enum(['selected', 'unmapped', 'detached']),
+}).refine(value => (value.status === 'selected') === (value.bindingId !== null));
+export const reviewDecisionSchema = z.strictObject({ decisionVersion: count });
+
+export type EvidenceDetail = z.infer<typeof evidenceDetailSchema>;
+export type EvidenceField = z.infer<typeof evidenceFieldSchema>;
+export type EvidenceCitation = z.infer<typeof evidenceCitationSchema>;
+export type EvidenceDocument = z.infer<typeof evidenceDocumentSchema>;
+export type ReviewSelection = z.infer<typeof reviewSelectionSchema>;
+export type EvidenceSearch = z.infer<typeof returnSearchSchema>;
+
 const identity = {
   id: identifier,
   clientId: identifier,
   clientName: z.string(),
   taxYear: z.number().int().min(1900).max(2200),
-  returnType: z.enum(['individual', 'business']),
-  destination: z.enum(['Client intake', 'ProWeb', 'Pro Desktop']),
+  returnType: z.enum(['individual', 'business', '1120']),
+  destination: z.enum(['Archived intake', 'Sigma Web', 'Sigma Desktop']),
 };
 export const summarySchema = z.object({
   ...identity,
@@ -89,127 +129,98 @@ export const summarySchema = z.object({
   conflictFields: count,
   missingFields: count,
   updatedAt: z.string(),
+  reviewRequired: z.boolean().default(false),
 });
-export const detailSchema = z
-  .object({
-    ...identity,
-    revision,
-    activeFieldId: z.string(),
-    fields: z.array(fieldSchema),
-    legacyFields: z.array(fieldSchema).default([]),
-    intakeContractVersion: z.union([z.string(), z.number()]).optional(),
-    documents: z.array(documentSchema),
-    events: z.array(eventSchema),
-  })
-  .superRefine((detail, context) => {
-    const fieldIds = new Set(detail.fields.map(field => field.id));
-    const documentIds = new Set(detail.documents.map(document => document.id));
-    if (fieldIds.size !== detail.fields.length || documentIds.size !== detail.documents.length) {
-      context.addIssue({ code: 'custom', message: 'Duplicate field or document identity.' });
-    }
-    if (detail.fields.length && !fieldIds.has(detail.activeFieldId)) {
-      context.addIssue({
-        code: 'custom',
-        message: 'The saved active field is not part of this return.',
-      });
-    }
-    for (const field of detail.fields) {
-      for (const citation of [
-        ...field.citations,
-        ...field.candidates.flatMap(candidate => candidate.citations),
-      ]) {
-        const source = detail.documents.find(document => document.id === citation.documentId);
-        if (!source || citation.page > source.pageCount) {
-          context.addIssue({
-            code: 'custom',
-            message: 'A citation points outside this return’s documents.',
-          });
-        }
-      }
-    }
-  });
 export const jobSchema = z.object({
   id: identifier,
   returnId: identifier,
-  status: z.enum([
-    'queued',
-    'running',
-    'cancelling',
-    'cancelled',
-    'ready_for_review',
-    'failed',
-    'interrupted',
-  ]),
-  stage: z.string(),
-  completedFields: count,
-  totalFields: count,
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  error: z.string().nullable(),
-  issues: z.array(z.string()),
-  sourceRevision: revision,
-  target: z.enum(['intake-form', 'legacy-generated']).default('legacy-generated'),
-  browserAvailable: z.boolean().default(false),
-  focusedFieldId: z.string().nullable().default(null),
-  submitted: z.boolean().default(false),
-  intakeId: z.string().nullable().default(null),
-  observedAt: z.string().nullable().default(null),
-  actionPending: z.boolean().default(false),
-  actionError: z.string().nullable().default(null),
-});
-export const browserStateSchema = z.object({
-  jobId: identifier.nullable(),
-  values: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
-  observedAt: z.string().nullable(),
-  submitted: z.boolean(),
-  intakeId: z.string().nullable(),
-  browserAvailable: z.boolean(),
-  focusedFieldId: z.string().nullable(),
+  inputRevision: identifier,
+  status: z.enum(['queued', 'preparing', 'verifying', 'ready_for_review', 'needs_attention', 'reconciling']),
   issues: z.array(z.string()),
 });
-export const returnSearchSchema = z.object({ field: identifier.optional() }).strict();
+export const returnSearchSchema = z.strictObject({
+  revision: identifier.optional(),
+  field: identifier.optional(),
+  document: identifier.optional(),
+  version: identifier.optional(),
+  citation: identifier.optional(),
+  page: z.number().int().positive().optional(),
+});
 export const queueSearchSchema = z
   .object({
     q: z.string().optional(),
     year: z.number().int().min(1900).max(2200).optional(),
+    inboxBatch: identifier.optional(),
+    inboxSlot: identifier.optional(),
   })
-  .strict();
+  .strict()
+  .refine(search => (search.inboxBatch === undefined) === (search.inboxSlot === undefined));
 
-export const inboxGroupSchema = z.object({
-  id: identifier,
-  clientName: z.string().nullable(),
-  taxYear: z.number().int().min(1900).max(2200).nullable(),
-  returnType: z.enum(['individual', 'business']).nullable(),
-  status: z.enum(['assigned', 'needs_assignment']),
-  returnId: identifier.nullable(),
-  clientId: identifier.nullable(),
-  issues: z.array(z.string()),
+const mediaType = z.enum(['application/pdf', 'text/plain']);
+const inboxAnalysis = z.object({
+  status: z.enum(['pending', 'filed', 'needs_review', 'failed']),
+  category: z.string().nullable(),
+  forms: z.array(z.string()),
+  facts: z.array(z.object({
+    label: z.string(),
+    value: z.string(),
+    page: z.number().int().positive().nullable(),
+    line: z.number().int().positive(),
+    quote: z.string(),
+    rect: rectangleSchema.nullish(),
+  })),
+  message: z.string().nullable(),
 });
-export const inboxDocumentSchema = z.object({
-  id: identifier,
+const practiceDraftSchema = z.object({
+  status: z.enum(['waiting', 'queued', 'preparing', 'ready', 'needs_review', 'failed']),
+  gated: z.string().nullish(),
+  message: z.string().nullish(),
+  url: z.string().nullable(),
+  bindings: z.record(z.string(), count),
+});
+
+const taxYear = z.number().int().min(1900).max(9999);
+const clientAssignmentSchema = z.object({ clientId: identifier, taxYear });
+export const intakeClientSchema = z.object({
+  clientId: identifier,
+  name: z.string(),
+  taxYears: z.array(taxYear).nullable(),
+});
+
+export const batchFileSchema = z.object({
+  slot: identifier,
   filename: z.string(),
-  mediaType: z.enum(['application/pdf', 'text/plain']),
-  status: z.enum(['uploaded', 'processing', 'needs_assignment', 'completed', 'failed']),
-  error: z.string().nullable(),
-  groups: z.array(inboxGroupSchema),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  mediaType,
+  state: z.enum(['pending', 'uploaded', 'excluded']),
+  uploadId: identifier.nullable(),
+  versionId: identifier.nullable(),
+  analysis: inboxAnalysis.nullish(),
+  practice: practiceDraftSchema.nullish(),
+  assignment: clientAssignmentSchema.nullish(),
 });
-export const intakeSchema = z.object({
-  configured: z.boolean(),
-  model: z.string(),
-  documents: z.array(inboxDocumentSchema),
+export const batchSchema = z.object({
+  batchId: identifier,
+  state: z.enum(['incomplete', 'sealed', 'excluded']),
+  approvedForAI: z.boolean(),
+  files: z.array(batchFileSchema),
 });
-export type InboxGroup = z.infer<typeof inboxGroupSchema>;
-export type InboxDocument = z.infer<typeof inboxDocumentSchema>;
-export type IntakeState = z.infer<typeof intakeSchema>;
+export const intakeSettingsSchema = z.object({
+  enabled: z.boolean(),
+  approvalLabel: z.string().nullable(),
+  message: z.string().nullable(),
+  canDownloadOriginals: z.boolean().default(false),
+  requiresClient: z.boolean().default(false),
+  canCreateClients: z.boolean().default(false),
+});
 
 export type ReturnSummary = z.infer<typeof summarySchema>;
-export type SourceDocument = z.infer<typeof documentSchema>;
-export type Citation = z.infer<typeof citationSchema>;
-export type Candidate = z.infer<typeof candidateSchema>;
-export type Field = z.infer<typeof fieldSchema>;
-export type ReviewEvent = z.infer<typeof eventSchema>;
-export type ReturnDetail = z.infer<typeof detailSchema>;
 export type Job = z.infer<typeof jobSchema>;
-export type BrowserState = z.infer<typeof browserStateSchema>;
+export type IntakeSettings = z.infer<typeof intakeSettingsSchema>;
+export type IntakeClient = z.infer<typeof intakeClientSchema>;
+export type ClientAssignment = z.infer<typeof clientAssignmentSchema>;
+export type Batch = z.infer<typeof batchSchema>;
+export type BatchFile = z.infer<typeof batchFileSchema>;
+export type PracticeDraft = z.infer<typeof practiceDraftSchema>;
+export type MediaType = z.infer<typeof mediaType>;
+export type RegionCitation = EvidenceCitation & { evidence: Extract<EvidenceCitation['evidence'], { precision: 'region' }> };
+export type LineCitation = EvidenceCitation & { evidence: Extract<EvidenceCitation['evidence'], { precision: 'lines' }> };

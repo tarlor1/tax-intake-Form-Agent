@@ -10,7 +10,8 @@ from datetime import date
 
 import pytest
 
-from review_fixtures import legacy_scenarios, source
+from review_fixtures import legacy_scenarios
+from src.sigma_demo.pdf import source
 from src.intake_contract import decode_value, field_definitions, normalize_value
 from src.review_store import ReviewError, ReviewStore
 

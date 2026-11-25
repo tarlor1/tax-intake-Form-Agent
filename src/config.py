@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BUNDLED_INPUTS = PROJECT_ROOT / "sample_inputs"
+OnlineProvider = Literal["gemini", "claude"]
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
@@ -50,54 +53,63 @@ class Paths:
     def report_pdf(self) -> Path:
         return self.outputs / "run_report.pdf"
 
-    def artifact_dirs(self) -> tuple[Path, ...]:
-        """Folders rewritten on every run (logs are kept)."""
-        return (self.followups, self.screenshots, self.checklists, self.needs_review)
-
 
 @dataclass(frozen=True)
 class Settings:
-    model: str
+    model: str | None
     effort: str
     headless: bool
     slow_mo_ms: int
-    offline: bool
+    online_provider: OnlineProvider | None
     paths: Paths
+    custom_inputs: bool = False
 
 
 def load_settings(
     *,
     headless: bool = False,
     slow_mo_ms: int = 300,
-    offline: bool = False,
+    online_provider: OnlineProvider | None = None,
     inputs_dir: Path | None = None,
     model: str | None = None,
 ) -> Settings:
-    """Read .env (without overriding variables already set) and combine it with CLI flags."""
-    load_dotenv(PROJECT_ROOT / ".env")
+    """Resolve local defaults; read online configuration only with explicit authorization."""
+    if online_provider not in (None, "gemini", "claude"):
+        raise ValueError("Online provider must be gemini or claude.")
+    if online_provider and inputs_dir is not None:
+        raise ValueError("--online-synthetic is limited to the bundled samples and cannot be used with --inputs.")
+    if model is not None and online_provider is None:
+        raise ValueError("--model requires --online-synthetic.")
 
-    effort = os.getenv("CLAUDE_EFFORT", DEFAULT_EFFORT).strip().lower()
-    if effort not in EFFORT_LEVELS:
-        raise ValueError(f"CLAUDE_EFFORT must be one of {', '.join(EFFORT_LEVELS)}; got {effort!r}")
-
-    if os.getenv("GEMINI_API_KEY", "").strip():
-        chosen_model = model or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
-    else:
-        chosen_model = model or os.getenv("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL
+    effort = DEFAULT_EFFORT
+    chosen_model = None
+    if online_provider is not None:
+        load_dotenv(PROJECT_ROOT / ".env")
+        if online_provider == "gemini":
+            key_name, model_name, default_model = "GEMINI_API_KEY", "GEMINI_MODEL", DEFAULT_GEMINI_MODEL
+        else:
+            key_name, model_name, default_model = "ANTHROPIC_API_KEY", "CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL
+            if os.getenv("ANTHROPIC_CUSTOM_HEADERS"):
+                raise ValueError("Unset ANTHROPIC_CUSTOM_HEADERS for the bundled synthetic demo.")
+            effort = os.getenv("CLAUDE_EFFORT", DEFAULT_EFFORT).strip().lower()
+            if effort not in EFFORT_LEVELS:
+                raise ValueError(f"CLAUDE_EFFORT must be one of {', '.join(EFFORT_LEVELS)}.")
+        if not os.getenv(key_name, "").strip():
+            raise ValueError(f"{key_name} is required for the selected online provider.")
+        chosen_model = model.strip() if model is not None else os.getenv(model_name, "").strip() or default_model
+        if not chosen_model:
+            raise ValueError("--model must not be empty.")
 
     return Settings(
-        model=chosen_model.strip(),
+        model=chosen_model,
         effort=effort,
         headless=headless,
         slow_mo_ms=0 if headless else max(slow_mo_ms, 0),
-        offline=offline,
+        online_provider=online_provider,
         paths=Paths(
-            inputs=(inputs_dir or PROJECT_ROOT / "sample_inputs").resolve(),
+            inputs=(inputs_dir if inputs_dir is not None else BUNDLED_INPUTS).resolve(),
             form_dir=PROJECT_ROOT / "intake_form",
             outputs=PROJECT_ROOT / "outputs",
         ),
+        custom_inputs=inputs_dir is not None,
     )
-
-
-def has_api_key() -> bool:
-    return bool(os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("ANTHROPIC_API_KEY", "").strip())

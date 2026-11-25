@@ -14,8 +14,8 @@ export default function App() {
       </header>
       <Outlet />
       <footer className="app-footer mx-5 flex flex-col gap-1.5 border-t border-border py-[25px] text-[9px] text-muted-foreground min-[661px]:mx-[4%] min-[661px]:flex-row min-[661px]:justify-between min-[661px]:gap-5 min-[661px]:text-[10px]">
-        <span>Review workspace · Local storage</span>
-        <span>Review decisions and source history stay in this workspace.</span>
+        <span>Sigma evidence companion</span>
+        <span>Review evidence here; enter and save values in the separate tax software window.</span>
       </footer>
     </>
   );

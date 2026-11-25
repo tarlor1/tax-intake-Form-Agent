@@ -32,8 +32,6 @@ log = logging.getLogger(__name__)
 # Default model for Google Gemini
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
-# Fallback beta settings for Anthropic
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 16_000
 
 
@@ -229,7 +227,7 @@ class GeminiAI:
         if not self._calls:
             return None
         return (
-            f"{self._calls} Gemini API call(s), {self._input_tokens:,} input / "
+            f"{self._calls} Gemini API response(s), {self._input_tokens:,} input / "
             f"{self._output_tokens:,} output tokens"
         )
 
@@ -251,47 +249,30 @@ class GeminiAI:
 
         config = types.GenerateContentConfig(**config_kwargs)
 
-        # Handle temporary spikes in demand with retry and fallback
-        models_to_try = [self.model]
-        if self.model != "gemini-3.5-flash":
-            models_to_try.append("gemini-3.5-flash")
-
-        response = None
-        last_error = None
-        for m in models_to_try:
-            for attempt in range(4):
-                try:
-                    response = self._client.models.generate_content(
-                        model=m,
-                        contents=prompt,
-                        config=config,
-                    )
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    err_msg = str(exc)
-                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
-                        delay_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_msg, re.IGNORECASE)
-                        wait_seconds = float(delay_match.group(1)) + 1.0 if delay_match else 21.0
-                        log.warning(
-                            "Gemini rate limit reached (free tier limit). Waiting %.1f s for quota to reset (attempt %d/4)...",
-                            wait_seconds,
-                            attempt + 1,
-                        )
-                        time.sleep(wait_seconds)
-                        continue
-                    if "503" in err_msg or "high demand" in err_msg.lower():
-                        log.warning("Model %s high demand on attempt %d: %s. Retrying...", m, attempt + 1, exc)
-                        time.sleep(2.0)
-                        continue
-                    raise AIOutputError(f"Gemini API error: {exc}") from exc
-            if response is not None:
-                if m != self.model:
-                    log.info("Request was served by fallback model %s", m)
+        for attempt in range(1, 5):
+            try:
+                response = self._client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=config,
+                )
                 break
-
-        if response is None:
-            raise AIOutputError(f"Gemini API error: {last_error}")
+            except Exception as exc:
+                # Provider errors may contain response bodies. Inspect only for retry
+                # classification and never export those strings to logs or artifacts.
+                if attempt == 4:
+                    raise RuntimeError("Gemini API request failed") from exc
+                err_msg = str(exc)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+                    delay_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_msg, re.IGNORECASE)
+                    wait_seconds = float(delay_match.group(1)) + 1.0 if delay_match else 21.0
+                    log.warning("Gemini rate limit reached; waiting %.1f s to retry (attempt %d/4)", wait_seconds, attempt)
+                    time.sleep(wait_seconds)
+                elif "503" in err_msg or "high demand" in err_msg.lower():
+                    log.warning("Gemini temporarily unavailable; retrying (attempt %d/4)", attempt)
+                    time.sleep(2.0)
+                else:
+                    raise RuntimeError("Gemini API request failed") from exc
 
         self._calls += 1
         if response.usage_metadata:
@@ -352,7 +333,7 @@ class ClaudeAI:
         if not self._calls:
             return None
         return (
-            f"{self._calls} Claude API call(s), {self._input_tokens:,} input / "
+            f"{self._calls} Claude API response(s), {self._input_tokens:,} input / "
             f"{self._output_tokens:,} output tokens"
         )
 
@@ -361,29 +342,17 @@ class ClaudeAI:
         if json_schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": json_schema}
 
-        response = self._client.beta.messages.create(
+        response = self._client.messages.create(
             model=self.model,
             max_tokens=MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": prompt}],
             output_config=output_config,
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
         )
 
         self._calls += 1
         self._input_tokens += response.usage.input_tokens
         self._output_tokens += response.usage.output_tokens
-        log.debug(
-            "Claude response: model=%s stop=%s in=%d out=%d request_id=%s",
-            response.model,
-            response.stop_reason,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-            response._request_id,
-        )
-        if response.model != self.model:
-            log.info("Request was served by fallback model %s", response.model)
 
         if response.stop_reason == "refusal":
             category = getattr(response.stop_details, "category", None)

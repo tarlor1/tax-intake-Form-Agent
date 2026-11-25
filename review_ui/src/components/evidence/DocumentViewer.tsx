@@ -7,28 +7,33 @@ import {
   type RenderTask,
 } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { api, errorMessage, type Citation, type SourceDocument } from '../../lib/api';
+import { api, errorMessage } from '../../lib/api';
+import type { EvidenceDocument, RegionCitation } from '../../lib/apiSchemas';
 import { Button } from '@/components/ui/button';
 import { NativeSelect } from '@/components/ui/native-select';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
-interface Props {
-  returnId: string;
-  document: SourceDocument;
-  citation: Citation | null;
-}
+type SourceAccess =
+  | { returnId: string; revision: string; loadOriginal?: never }
+  | { loadOriginal: (signal?: AbortSignal) => Promise<Response>; returnId?: never; revision?: never };
 
-export default function DocumentViewer({ returnId, document: source, citation }: Props) {
+type Props = SourceAccess & {
+  document: EvidenceDocument;
+  citation: RegionCitation['evidence'] | null;
+  citationLabel?: string;
+  page: number;
+  onChoosePage: (page: number) => void;
+};
+
+export default function DocumentViewer({
+  returnId, document: source, revision, loadOriginal, citation, citationLabel, page, onChoosePage,
+}: Props) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [width, setWidth] = useState(600);
-  const [pageChoice, setPageChoice] = useState({
-    citationId: citation?.id,
-    page: citation?.page ?? 1,
-  });
   const [rendered, setRendered] = useState('');
   const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
 
@@ -36,9 +41,7 @@ export default function DocumentViewer({ returnId, document: source, citation }:
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [downloading, setDownloading] = useState(false);
 
-  // A newly selected citation takes priority over a manually browsed PDF page.
-  const page = pageChoice.citationId === citation?.id ? pageChoice.page : (citation?.page ?? 1);
-  const renderKey = `${source.id}:${source.version}:${page}:${width}:${zoom}:${retry}`;
+  const renderKey = `${source.id}:${source.versionId}:${page}:${width}:${zoom}:${retry}`;
 
   useEffect(() => {
     const target = viewportRef.current;
@@ -64,7 +67,10 @@ export default function DocumentViewer({ returnId, document: source, citation }:
     async function loadPdf() {
       try {
         // Fetch bytes ourselves so the PDF request uses the same authenticated API.
-        const bytes = await api.pdf(returnId, source.id, controller.signal);
+        const response = loadOriginal
+          ? await loadOriginal(controller.signal)
+          : await api.original(returnId, revision, source.id, source.versionId, controller.signal);
+        const bytes = new Uint8Array(await response.arrayBuffer());
         if (cancelled) return;
 
         loadingTask = getDocument({ data: bytes, useSystemFonts: true });
@@ -79,9 +85,9 @@ export default function DocumentViewer({ returnId, document: source, citation }:
     return () => {
       cancelled = true;
       controller.abort();
-      if (loadingTask) void loadingTask.destroy().catch(() => {});
+      if (loadingTask) void loadingTask.destroy().catch(() => { });
     };
-  }, [returnId, source.id, source.version, retry]);
+  }, [returnId, source.id, source.versionId, revision, loadOriginal, retry]);
 
   useEffect(() => {
     if (!pdf || !canvasRef.current) return;
@@ -146,18 +152,14 @@ export default function DocumentViewer({ returnId, document: source, citation }:
     }
   }, [rendered, renderKey, citation, page, pageSize]);
 
-  function choosePage(value: number) {
-    setPageChoice({ citationId: citation?.id, page: value });
-  }
-
   async function downloadOriginal() {
     setDownloading(true);
 
     try {
-      const bytes = await api.pdf(returnId, source.id, new AbortController().signal);
-      const url = URL.createObjectURL(
-        new Blob([new Uint8Array(bytes).buffer], { type: 'application/pdf' }),
-      );
+      const response = loadOriginal
+        ? await loadOriginal()
+        : await api.original(returnId, revision, source.id, source.versionId);
+      const url = URL.createObjectURL(await response.blob());
 
       const anchor = window.document.createElement('a');
       anchor.href = url;
@@ -174,7 +176,7 @@ export default function DocumentViewer({ returnId, document: source, citation }:
   }
 
   const ready = rendered === renderKey && !!pdf;
-  const count = pdf?.numPages ?? source.pageCount;
+  const count = pdf?.numPages ?? source.pageCount ?? 1;
   const pageDescription =
     citation?.page === page
       ? `Highlighted evidence: ${citation.quote}`
@@ -188,7 +190,7 @@ export default function DocumentViewer({ returnId, document: source, citation }:
             variant="ghost" size="icon" className="size-7 text-sm text-[#798d68]"
             aria-label="Previous PDF page"
             disabled={page <= 1 || !pdf}
-            onClick={() => choosePage(page - 1)}
+            onClick={() => onChoosePage(page - 1)}
           >
             ←
           </Button>
@@ -198,7 +200,7 @@ export default function DocumentViewer({ returnId, document: source, citation }:
               aria-label="PDF page"
               value={page}
               disabled={!pdf}
-              onChange={event => choosePage(Number(event.target.value))}
+              onChange={event => onChoosePage(Number(event.target.value))}
             >
               {Array.from({ length: count }, (_, index) => (
                 <option key={index} value={index + 1}>
@@ -212,7 +214,7 @@ export default function DocumentViewer({ returnId, document: source, citation }:
             variant="ghost" size="icon" className="size-7 text-sm text-[#798d68]"
             aria-label="Next PDF page"
             disabled={page >= count || !pdf}
-            onClick={() => choosePage(page + 1)}
+            onClick={() => onChoosePage(page + 1)}
           >
             →
           </Button>
@@ -290,11 +292,11 @@ export default function DocumentViewer({ returnId, document: source, citation }:
           <span className="mt-1 inline-block size-[7px] shrink-0 rounded-[2px] bg-[#cbba44]" />
           <div>
             <strong className="text-[10px] font-semibold text-[#82936f]">
-              {citation.label} · page {citation.page}
+              {citationLabel} · page {citation.page}
             </strong>
             <blockquote className="mt-[5px] text-[11px] leading-[1.7] text-[#667b54] [overflow-wrap:anywhere]">“{citation.quote}”</blockquote>
             {citation.page !== page && (
-              <Button variant="link" className="mt-2 h-auto whitespace-normal p-0 text-[10px]" onClick={() => choosePage(citation.page)}>
+              <Button variant="link" className="mt-2 h-auto whitespace-normal p-0 text-[10px]" onClick={() => onChoosePage(citation.page)}>
                 Return to highlighted evidence
               </Button>
             )}

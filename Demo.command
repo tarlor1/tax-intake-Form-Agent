@@ -11,14 +11,16 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-clear
+if [[ -t 1 && -n "${TERM:-}" ]]; then
+    clear || true
+fi
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║   Tax Client Intake Automation — Demo                      ║"
 echo "║                                                            ║"
 echo "║   A browser will open and process 10 sample client emails. ║"
 echo "║   Watch the system read, extract, fill, and verify each.   ║"
 echo "║                                                            ║"
-echo "║   Running in OFFLINE mode (no API key needed).             ║"
+echo "║   Intake uses local rules; no external AI requests.         ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -50,6 +52,7 @@ echo "✓  Python $PY_VERSION"
 if [ ! -f ".venv/bin/python" ]; then
     echo ""
     echo "⏳  First run — setting up the environment (this takes ~1 minute)..."
+    echo "   Setup may download dependencies and Chromium."
     echo "   Creating virtual environment..."
     python3 -m venv .venv
 
@@ -70,19 +73,22 @@ echo "   (Close this terminal window when you're done.)"
 echo ""
 
 # ── 3. Run the pipeline ──────────────────────────────────────────
-.venv/bin/python main.py --offline --slow-mo 600
+status=0
+.venv/bin/python main.py --offline --slow-mo 600 || status=$?
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
-echo "  ✅  Demo complete!"
-echo ""
-echo "  Results are in: $DIR/outputs/"
-echo "    • run_report.pdf   — Summary report"
-echo "    • screenshots/     — Confirmation screenshots"
-echo "    • followups/       — Draft follow-up emails"
-echo "    • checklists/      — Document checklists"
+case "$status" in
+    0) echo "Demo complete." ;;
+    1) echo "Demo complete with records needing attention." ;;
+    *) echo "Demo could not complete. See the message above." ;;
+esac
+if [ "$status" -le 1 ]; then
+    echo "See the report path above. Each run has its own folder in $DIR/outputs/runs/."
+fi
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 echo "Press any key to close..."
-read -n1
+read -r -n1 || true
+exit "$status"
 

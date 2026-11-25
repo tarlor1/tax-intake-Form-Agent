@@ -256,7 +256,6 @@ def test_two_invalid_answers_flag_the_record_for_human_review():
     assert result.attempts == 2
     assert len(ai.previous_errors) == 2, "must not call the model a third time"
     assert len(result.errors) == 2
-    assert result.raw_outputs == ["not json", json.dumps(make_payload(email="nope"))]
 
 
 def test_refusal_counts_as_an_invalid_attempt():
@@ -275,4 +274,22 @@ def test_repeated_refusal_is_flagged():
     result = extract_intake("email", ai)
 
     assert result.needs_human_review
-    assert result.raw_outputs == []
+    assert all("AI returned no usable output" in error for error in result.errors)
+
+
+def test_validation_feedback_and_logs_exclude_untrusted_response_text(caplog):
+    sensitive = "SYNTHETIC_PRIVATE_RESPONSE"
+    ai = ScriptedAI(
+        make_payload(state=sensitive, **{sensitive: sensitive}),
+        AIOutputError(f"provider response body echoed {sensitive}"),
+    )
+
+    result = extract_intake("synthetic email", ai)
+
+    assert result.needs_human_review
+    assert result.errors == [
+        "attempt 1: state: value_error; (root): extra_forbidden",
+        "attempt 2: AI returned no usable output",
+    ]
+    assert ai.previous_errors[1] == "state: value_error; (root): extra_forbidden"
+    assert sensitive not in caplog.text

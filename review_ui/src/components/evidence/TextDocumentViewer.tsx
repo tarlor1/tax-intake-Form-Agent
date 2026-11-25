@@ -1,15 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, errorMessage, type Citation, type SourceDocument } from '../../lib/api';
+import { api, errorMessage } from '../../lib/api';
+import type { EvidenceDocument, LineCitation } from '../../lib/apiSchemas';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 
-interface Props {
-  returnId: string;
-  document: SourceDocument;
-  citation: Citation | null;
-}
+type SourceAccess =
+  | { returnId: string; revision: string; loadOriginal?: never }
+  | { loadOriginal: (signal?: AbortSignal) => Promise<Response>; returnId?: never; revision?: never };
 
-export default function TextDocumentViewer({ returnId, document: source, citation }: Props) {
+type Props = SourceAccess & {
+  document: EvidenceDocument;
+  citation: LineCitation['evidence'] | null;
+  citationLabel?: string;
+};
+
+export default function TextDocumentViewer({ returnId, document: source, citation, citationLabel, revision, loadOriginal }: Props) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
@@ -20,8 +25,11 @@ export default function TextDocumentViewer({ returnId, document: source, citatio
     setError('');
     setLines(null);
 
-    void api
-      .text(returnId, source.id, controller.signal)
+    const response = loadOriginal
+      ? loadOriginal(controller.signal)
+      : api.original(returnId, revision, source.id, source.versionId, controller.signal);
+    void response
+      .then(response => response.text())
       .then(text => {
         if (controller.signal.aborted) return;
 
@@ -33,7 +41,7 @@ export default function TextDocumentViewer({ returnId, document: source, citatio
         if (!controller.signal.aborted) setError(errorMessage(reason));
       });
     return () => controller.abort();
-  }, [returnId, source.id, source.version, retry]);
+  }, [returnId, source.id, source.versionId, revision, loadOriginal, retry]);
 
   useEffect(() => {
     if (!lines || !citation?.lineStart) return;
@@ -85,7 +93,7 @@ export default function TextDocumentViewer({ returnId, document: source, citatio
         <div className="flex items-start gap-[9px] border-t border-[#e1e7d9] bg-[#fbfcf7] px-[21px] py-4">
           <div>
             <strong className="text-[10px] font-semibold text-[#82936f]">
-              {citation.label} ·{' '}
+              {citationLabel} ·{' '}
               {citation.lineStart
                 ? `lines ${citation.lineStart}–${citation.lineEnd ?? citation.lineStart}`
                 : 'text source'}

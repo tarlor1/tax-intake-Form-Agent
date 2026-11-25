@@ -7,10 +7,8 @@ import copy
 import pytest
 
 from src.review_documents import source_pages
-from src.review_intake import validate_extraction
-from src.review_jobs import _signature
 from src.review_store import ReviewStore, _candidate_origin
-from review_fixtures import source
+from src.sigma_demo.pdf import source
 
 
 NAME = "Avery Morgan"
@@ -22,26 +20,11 @@ def field(detail, identifier):
 
 
 def normalized_values(**overrides):
-    record = {
-        "full_name": NAME,
-        "email": None,
-        "phone": None,
-        "date_of_birth": DOB,
-        "street_address": None,
-        "city": None,
-        "state": None,
-        "zip_code": None,
-        "drivers_license_number": None,
-        "drivers_license_state": None,
-        "drivers_license_expires_on": None,
-        "tax_year": 2025,
-        "urgency": {"level": "medium", "reason": "Routine preparation."},
-        "missing_fields": [],
+    values = {
+        "full_name": NAME, "date_of_birth": DOB, "tax_year": "2025", "urgency": "medium",
+        **overrides,
     }
-    record.update(overrides)
-    return validate_extraction({"groups": [{
-        "clientName": record["full_name"], "returnType": "individual", "record": record,
-    }]})[0]["values"]
+    return [{"fieldId": field, "value": str(value)} for field, value in values.items() if value is not None]
 
 
 def import_values(store, detail, content, values, media_type="text/plain"):
@@ -170,7 +153,7 @@ def test_shared_client_birth_date_remains_citable_across_requested_years(tmp_pat
         assert dob["citations"][0]["quote"] == "DOB: May 12, 1988"
 
 
-def test_legacy_candidates_enrich_on_read_without_ai_or_storage_mutation(tmp_path, monkeypatch):
+def test_legacy_candidates_enrich_on_read_without_storage_mutation(tmp_path):
     store = ReviewStore(tmp_path)
     saved = import_values(
         store, new_return(store), b"Client: Avery Morgan\nTax year: 2025\nDOB: May 12, 1988\n",
@@ -184,14 +167,9 @@ def test_legacy_candidates_enrich_on_read_without_ai_or_storage_mutation(tmp_pat
     assert field(raw, "date_of_birth")["citations"] == []
     original = copy.deepcopy(raw)
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Legacy local citation enrichment cannot call Gemini")
-
-    monkeypatch.setattr("src.review_intake.ReviewIntake._call_gemini", forbidden)
     reopened = ReviewStore(tmp_path)
     enriched = reopened.get_return(saved["id"])
     assert field(enriched, "date_of_birth")["citations"]
-    assert _signature(enriched) == _signature(original)
     assert enriched["revision"] == original["revision"]
     assert enriched["events"] == original["events"]
     assert field(enriched, "date_of_birth")["revision"] == field(original, "date_of_birth")["revision"]

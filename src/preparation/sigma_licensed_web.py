@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from getpass import getpass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.async_api import Error, Page, Request, Route, async_playwright
 
@@ -27,6 +28,48 @@ _DUPLICATE_NOTICE = (
 )
 _SUMMARY_TITLE = "stp - Tax Return Summary"
 _EXIT_TITLE = "stp - Office Client List"
+
+
+_RETURN_KEY = re.compile(r"returnNotes-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", re.I)
+
+
+async def reopen_summary(page: Page, *, first_name: str, last_name: str, mock_ssn: str, draft_key: str) -> None:
+    """Reopen the exact previously bound synthetic return through Sigma's client grid."""
+    url = urlsplit(page.url)
+    if (
+        page.context.pages != [page] or (url.scheme, url.netloc) != ("https", "stp.cloudtaxoffice.com")
+        or await page.title() != _EXIT_TITLE
+        or not re.fullmatch(r"987-65-432[0-9]", mock_ssn)
+    ):
+        raise WebBlocked("Sigma is not on the authorized practice draft list.")
+
+    identity = re.compile(
+        rf"^\s*(?:{re.escape(first_name)}\s+{re.escape(last_name)}|"
+        rf"{re.escape(last_name)}\s*,?\s+{re.escape(first_name)})\s*$", re.I,
+    )
+    link = page.get_by_role("link", name=mock_ssn, exact=True).and_(page.locator("a.EnterReturn"))
+    name_cell = page.get_by_role("cell", name=identity)
+    row = page.get_by_role("row").filter(has=link).filter(has=name_cell)
+    if await row.count() != 1 or not await row.is_visible():
+        raise WebBlocked("The practice draft identity is not unique in Sigma.")
+
+    classes = await row.locator('[class*="returnNotes-"]').evaluate_all(
+        "(nodes) => nodes.flatMap(node => Array.from(node.classList))",
+    )
+    matches = [m.group(1) for name in classes if (m := _RETURN_KEY.fullmatch(name))]
+    if matches != [draft_key]:
+        raise WebBlocked("The exact native draft key did not match the practice assignment.")
+
+    try:
+        await click_visible_target(row.get_by_role("link", name=mock_ssn, exact=True))
+        await page.get_by_role("heading", name="Tax Return Summary", exact=True).wait_for(timeout=15_000)
+    except (Error, ControlBlocked):
+        raise WebBlocked("The practice draft did not reopen to its reviewed summary.") from None
+    if (
+        page.context.pages != [page] or not page.url.lower().startswith(f"{_ORIGIN}/2025/avalon/")
+        or await page.title() != _SUMMARY_TITLE
+    ):
+        raise WebBlocked("Reopened Sigma summary is not in the expected 2025 draft context.")
 
 
 async def exit_summary(page: Page) -> None:

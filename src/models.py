@@ -153,9 +153,11 @@ _MAX_DEPENDENTS = 20
 
 
 def mask_identifier(value: str) -> str:
-    """Show only the last four characters of an ID number (for reports and screenshots)."""
+    """Show at most the last four characters, never the full identifier."""
     compact = re.sub(r"[\s-]", "", value)
-    return "•" * max(len(compact) - 4, 0) + compact[-4:]
+    if len(compact) <= 4:
+        return "•" * len(compact)
+    return "•" * (len(compact) - 4) + compact[-4:]
 
 
 class Urgency(BaseModel):
@@ -449,3 +451,4 @@ class RecordResult:
     artifacts: list[Path] = field(default_factory=list)
     error: str | None = None
     duration_s: float = 0.0
+    checklist_failed: bool = False

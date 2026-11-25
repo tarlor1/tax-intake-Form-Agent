@@ -1,20 +1,16 @@
 # Tax Document Intake and Review
 
-Upload selectable-text PDFs and UTF-8 text files, identify client/year groups with Gemini, and fill the original `intake_form/index.html` through Playwright while reviewing its source evidence alongside.
+The review companion keeps a PDF/TXT inbox and a separate evidence window for the Sigma Tax Pro draft workflow. The former intake-form preview, mirrored editors, and submit controls are gone. The email-intake demo in `main.py` is independent.
 
-The controller, storage, and browser workers run locally. The intake website runs on a separate HTTP origin and is treated as an external website: ordinary browser interaction only. Gemini is an external service; TaxSlayer is not connected. The original email-intake CLI remains available in `main.py`.
-
-> Bundled examples are fictional. The workspace starts empty and stores only information and files you explicitly add. Use approved synthetic/redacted documents; live taxpayer data must not be sent to external AI under the current agreement.
+> Use synthetic documents for local testing. This repository does not authorize live taxpayer data or unattended access to Sigma Tax Pro.
 
 ## Local review workspace
 
-The workspace uses **React/TypeScript + TanStack Router + Vite, Tailwind CSS, shadcn/ui, Bun, FastAPI, SQLite, PDF.js, Google Gen AI, and Playwright**. Drag-and-drop intake uses react-dropzone and supports mixed clients and years. Gemini returns normalized client/year drafts using the original intake model; originals remain available for preparer review.
-
-The review page combines grouped editable fields, documentary evidence, and a **view-only image of the actual Chromium browser**. Local typing does not send individual keystrokes to Playwright. Applying a field sends its complete value through the original website's native controls and confirms the result by browser readback. There is no injected target script or target-API shortcut. The unchanged intake website is the TaxSlayer stand-in.
-
-![Original intake website and adjacent documentary evidence](docs/review-workspace.png)
+A drop groups upload progress and retries, not preparation. Each committed file can proceed independently. Work and ownership are scoped to the verified return, so a failed upload for one client does not hold up another. A new document for a return already open for review creates a successor revision; it does not take over the open return.
 
 From the project root, with an activated Python environment and Bun 1.4.4:
+
+Install the PostgreSQL server tools (`sudo pacman -S postgresql` on Arch Linux). You do not need to enable a system database service.
 
 ```bash
 pip install -r review-requirements.txt
@@ -23,75 +19,75 @@ python -m playwright install chromium
 python review.py
 ```
 
-Create a project-root `.env` file (gitignored), then restart the service:
+`review.py` starts the backend and opens the built frontend at `http://127.0.0.1:8765`. In **Document inbox**, add or select a client and enter the tax year, then drop selectable-text PDF or UTF-8 TXT files up to 10 MiB. Files in the same drop must belong to the same client and year. `sample_inputs/` works without an API key or tax application. Originals and client assignments survive restarts. Use `--data-dir` to select a persistent workspace; the default is `outputs/review_workspace/`.
 
-```dotenv
-GEMINI_API_KEY=your-key
-GEMINI_MODEL=gemini-3.5-flash-lite
-```
+The local inbox processes each committed original independently and files it by category. It lists forms mentioned in intake correspondence and extracts amounts only when it can establish the box and cite the original. Click **Open evidence** to inspect the values and their source in the workspace. Only the practice tax form opens in a separate window. Uncertain boxes stay flagged for manual review. Previously uploaded originals are analyzed again when the extraction version changes. OCR scans are not supported.
 
-Get the key from [Google AI Studio](https://aistudio.google.com/api-keys). The selected model has a [free tier](https://ai.google.dev/gemini-api/docs/pricing#gemini-3.5-flash-lite), subject to project eligibility and quota; paid projects can incur charges. Free-tier content may be used for product improvement. Extraction requires explicit confirmation that the files are approved synthetic/redacted documents. Keys stay in the local environment, never in browser settings or SQLite.
+When extraction finishes, each document moves to its client and tax year under **Saved workspaces → Saved documents**. Search by client name, filename, form type, or document category, or filter by tax year. Earlier uploads appear under **Unassigned documents**; assign them there without re-uploading. The inbox retains pending uploads and files still being extracted.
 
-One launcher starts the companion at `http://127.0.0.1:8765` and independently serves the unchanged `intake_form/index.html` on another loopback port. Both URLs are printed. `--no-browser` suppresses opening the dashboard; `--show-workers` shows native Chromium windows. To use an already-running stand-in, pass `--intake-url http://127.0.0.1:PORT/index.html`. The default automation limit is two; `--workers` changes the configured limit, not the hardware's proven capacity. **Current process supervision is Linux-only.**
+Files `01`–`10` are intake documents. The [public W-2 and 1099 examples](sample_inputs/SOURCES.md) in `11`–`13` have selectable text and ruled boxes.
 
-The launcher serves only the compiled frontend. Vite is a build tool, not a separate application server. After frontend source changes, run `(cd review_ui && bun run build)`, restart `python review.py`, and refresh the dashboard.
+The local inbox never opens the old `review.sqlite3`. To inspect that archive separately, run `python review.py --inspect-archive` (with `--data-dir` if needed). If SQLite reports that it needs rollback recovery, keep the archive and its journal together.
 
-SQLite stores original documents, candidates, review history, jobs, locally observed browser values, and observed receipt IDs in `outputs/review_workspace/`. Use `--data-dir` and `--port` for another workspace. **The stand-in's submitted records are in memory only; it has no Save Draft.** Closing the dashboard leaves the local service and retained browsers running. Stopping the service closes its browsers. Rebuild before launching, and restart the service after rebuilding.
-
-Startup creates an empty schema; it never inserts clients, example values, or PDFs. Clearing the database stays cleared after restart. Stop the service before manually clearing or replacing its database. Existing records, including earlier example records, are preserved until explicitly removed; this update does not purge them. Generated examples now live only in test fixtures.
-
-**Document inbox:** Drop multiple selectable-text PDFs or UTF-8 `.txt` files anywhere in the main Clients workspace, including outside the inbox card, or use **Select files**. No client setup is required first. Files are limited to 10 MiB; scans/photos/OCR remain unsupported. Uploading saves and validates readable text locally; it does not send documents to Gemini. The upload bar shows file-level progress, and extraction uses an indeterminate bar because the model does not report a completion percentage. Each file shows its saved, processing, failed, or extracted status.
-
-To identify clients and extract structured values, configure GEMINI_API_KEY, approve the external-data transfer, and choose **Extract uploaded documents**. The message above the button explains any unmet requirement. Upload, extraction, and assignment failures remain visible per file; other files continue. Retry failed files explicitly. An API key is required for Gemini extraction, not for local upload or PDF/TXT text validation.
-
-Gemini receives a JSON Schema through `response_json_schema`. Each detected client/year record uses the original `IntakeExtraction` normalization and `form_values()` mapping, including dates, state codes, choices, income categories, urgency, and summaries. Invalid structured records receive one validation-feedback retry. Generation omits bounds that make the provider grammar unacceptable; the application still validates the original model. Provider failures report an HTTP status and fixed guidance without exposing raw error payloads or credentials.
-
-**AI drafts and source locations:** Extraction does not require literal answer matches, non-overlapping source lines, or taxpayer identifiers. Multiple clients or requested tax years may share source paragraphs. Imported answers remain AI-extracted drafts pending preparer review. Local source matching adds exact quotes and PDF regions or TXT lines when an unambiguous location is available, including normalized dates such as a prose birth date. Existing saved drafts gain available locations without another Gemini request. A location is not independent verification of the answer; inferred summaries and ambiguous matches retain document context without manufactured highlights. Conflicting values and preparer edits are preserved.
-
-Shared client identity/contact details can be cited across multiple requested years when the document identifies that client and does not scope the line to another year. Year-specific and ambiguously attributed values still require a matching scope. This also applies to previously uploaded documents without re-extraction.
-
-Clicking or tabbing into an editable field immediately selects its evidence without moving input focus or applying the value. Fields without a citation show an explicit message; changing fields clears the previous highlight while preserving local edits.
-
-The intake preview defaults to **Fit width** so the full form width is visible without horizontal scrolling. **Preview zoom** offers 50%, 75%, 100%, and 125% of the original image size for closer inspection; changing preview zoom does not change the destination form or its values.
-
-For temporary diagnostics, start the backend with raw-response logging:
+To let Gemini prepare separate drafts for those published samples in the existing synthetic tax form, configure `GEMINI_API_KEY` in your shell or `.env` and run:
 
 ```bash
-GEMINI_DEBUG=1 uv run --no-project --with-requirements review-requirements.txt python review.py
+python review.py --practice-gemini
 ```
 
-Gemini's generated JSON appears in the backend terminal before record validation, inside a JSON-escaped `response` log field. It can contain document-derived personal information: use approved sample/redacted documents, redact logs before sharing, and leave `GEMINI_DEBUG` unset normally. Extraction-only changes need a backend restart, not a frontend rebuild. This AI-draft UI update has already been built; restart the backend and reopen older tabs to load it.
+Check the Gemini approval before upload, or click **Approve Gemini and prepare** in the evidence window for an existing upload. The worker opens a headed browser and writes only supported verified boxes. It saves and independently reopens the draft before **Open practice draft** becomes available. During review, focusing a bound draft field selects its source citation. The original PDFs never go to Gemini; its tool requests contain guarded choices. Other uploads stay local, and no tax return is transmitted or filed.
 
-Each detected client/year gets its own workspace and preparation session. A unique normalized client name can match across files and years when provided email and birth-date details do not conflict; ambiguous names or conflicting details require a choice instead of a silent merge. Missing client name, year, or return type can be assigned inline. No SSN is required. The same client's different years share a client profile but keep separate returns and browser sessions.
+The web worker offers a `set_fields` action for the writable, verified fields on the current page or record. One model call selects the group; the MCP host enters and checks the values locally. Navigation and Save remain separate actions. The licensed Sigma entry command below is an inspection tool, not an enrolled worker.
+
+For custom dropdowns, the browser helper matches the option inside the active popup, scrolls it into view, and checks that the browser would deliver the click to that option even when the sidebar covers part of it. It verifies the selected value afterward.
+
+If Gemini returns HTTP 503 during preparation, the worker retries the failed model request up to twice within the same authorization and request budget. It does not replay form edits. An exhausted retry leaves the evidence available and does not expose an unverified draft.
+
+
+### Firm practice integration
+
+Set `SIGMA_COORDINATOR_DSN` from the firm secret store and pre-provision a dedicated PostgreSQL schema. Run the coordinator roles as separate processes:
+
+```bash
+python sigma_service.py --schema "$SIGMA_SCHEMA" migrate
+python sigma_service.py --schema "$SIGMA_SCHEMA" --site "$SIGMA_SITE_FACTORY" serve
+python sigma_service.py --schema "$SIGMA_SCHEMA" --site "$SIGMA_SITE_FACTORY" dispatch
+python sigma_service.py --schema "$SIGMA_SCHEMA" --site "$SIGMA_SITE_FACTORY" worker
+```
+
+`serve` listens on loopback for a firm-controlled HTTPS reverse proxy and accepts `--port` (default `8766`). `dispatch` processes committed uploads; `worker` runs eligible jobs on an enrolled interactive host. Both accept `--once` for one bounded pass. The trusted, installed `MODULE:FACTORY` named by `--site` accepts the coordinator database and returns a [`FirmSite`](src/preparation/site.py). The firm supplies SSO and assignments, protected originals, independent source verification, native proof, platform profiles, and any upstream portal integration.
+
+Intake, client assignment, and citation extraction do not open the tax application. The worker uses the trusted site's `WorkerEnrollment.native` and field plan to open the exact draft, enter supported values, and verify a reopen. A new Web, desktop, or MCP integration belongs in that adapter layer; it does not change source extraction or the upload contract. Selecting a client on an upload records where it belongs in the workspace. Firm-side attribution and permission to prepare the return still require independent verification.
 
 To check the licensed Sigma Web 2025 entry point without creating a return, run `python -m src.preparation.sigma_licensed_web --profile-directory /absolute/path/to/dedicated-chromium-profile`. Use an existing private profile directory, sign into Sigma if prompted, and select tax year 2025. The check opens the SSN dialog, verifies its field layout, and exits without entering values or pressing **Start Return**. It does not enroll the worker or prepare a draft.
 
-**One-page review:** Edit all supported fields in grouped sections beside the original form preview and source evidence. Typing stays local; **Apply** sends a complete value through Playwright and records preparer provenance only after successful native readback. Local drafts survive background polling. **Use in form** applies a document candidate and records its source decision after readback. Reasons are optional. Selecting evidence never accepts a proposal automatically. The preview is view-only: its full-page image scrolls locally without queued wheel commands. Smooth scrolling targets at least 30 FPS; image refresh frequency and end-to-end command latency are separate measurements, and a 34 ms maximum latency is not guaranteed.
+In the authorized practice workspace, add `--check-mock-ssn` to verify keyboard autofocus across the six segments. The command prompts for a reserved mock SSN and never presses **Start Return**.
 
-After an extraction batch finishes, the backend automatically queues the assigned client/year returns using their latest saved revisions. Real Playwright opens the original `index.html`, fills normalized AI drafts and preparer values, verifies native control readback, and hands off **before submission**. Worker/session capacity governs when each queued browser opens; existing unsent browsers are not silently replaced. **Open and fill form** remains available for explicitly opening/reopening a return. Watch the preview or use `--show-workers` to interact directly with the native window. Explicitly confirm **Submit intake** in the dashboard to have Playwright click the original website's submit button; its native validation and confirmation remain authoritative. The worker still uses the original form's known field mapping; it is not a generic adaptive browser agent or a TaxSlayer connection.
+If Sigma shows its duplicate-return warning, the entry check stops. Do not retry **Start Return** or switch to another identifier to bypass the warning. Reopen the confirmed existing practice draft instead.
 
-Handoff releases the automation slot while retaining the browser. At most `max(4, workers)` sessions remain open; further jobs wait for capacity. Sessions are never silently expired or evicted. Explicitly close a retained browser before changing its source documents or opening another browser for that return. Restart preserves recorded evidence/history but cannot restore an unsent browser draft or replay a submission.
+The licensed 2025 adapter also has a guarded `exit_summary` operation: open **Exit Return**, confirm it in Sigma's **Ready to go?** prompt, and verify Sigma returned to its client list. This is an exit check, not proof that entries saved. Reopen the same draft and compare values to a source-backed expected result; a summary file checksum only verifies that the captured artifact did not change.
 
-Earlier generated-worksheet runs and facts remain historical records. Wage/totals have no corresponding intake controls and stay in read-only historical facts with their citations and corrections. Compatible phone facts can be reused. Previously completed extraction under the old field contract requires renewed consent and re-extraction; its earlier groups are preserved.
+Compare two complete, independently reopened native field inventories with `python -m src.preparation.sigma_saved_compare manual.json gemini.json`. The command reports missing, unexpected, or different fields without printing their values. It rejects a partial capture rather than reporting equality for the subset.
 
-**Source library** can attach PDF/TXT files to an existing return after its browser closes. Use **Extract documents** to process them; upload alone does not extract values. Originals are immutable and duplicate bytes are deduplicated. Original/corrected W-2 documents remain available as historical evidence; neither is silently discarded or mapped into an unrelated form control.
-
-Frontend: [inbox](review_ui/src/components/intake/DocumentInbox.tsx), [combined review](review_ui/src/components/review/ReviewWorkspace.tsx), [field editors](review_ui/src/components/review/FieldEditors.tsx), [actual browser preview](review_ui/src/components/automation/BrowserSurface.tsx), [PDF viewer](review_ui/src/components/evidence/DocumentViewer.tsx), and [TXT viewer](review_ui/src/components/evidence/TextDocumentViewer.tsx). Backend: [API](src/review_api.py), [Gemini intake](src/review_intake.py), [local citations](src/review_citations.py), [store](src/review_store.py), [native field contract](src/intake_contract.py), [queue](src/review_jobs.py), and [worker](src/review_worker.py).
-
-Development language servers are configured in `.omp/lsp.json`: the nested frontend uses its installed TypeScript server, and Pyright runs through Bun's native npm package instead of the Python launcher.
-
-Verification:
+The companion receives an individual SSO token through `SIGMA_REVIEW_ACCESS_TOKEN`. The enrollment file supplies the HTTPS service and profile, without credentials. To enable native review, supply the separate trusted local `MODULE:FACTORY`:
 
 ```bash
-(cd review_ui && bun run build)
-python -m pytest tests/test_review_citations.py tests/test_review_intake.py tests/test_review_drafts.py tests/test_review_auto_sessions.py tests/test_review_inbox_browser.py tests/test_review_intake_api.py tests/test_review_returns.py tests/test_review_workspace.py tests/test_review_documents.py tests/test_review_jobs.py tests/test_review_prototype_api.py tests/test_review_worker_browser.py tests/test_form_server.py
+python review.py --sigma-config "$SIGMA_PRACTICE_CONFIG" \
+  --native-review-factory "$SIGMA_NATIVE_REVIEW_FACTORY" --data-dir "$SIGMA_ACCEPTANCE_DIR"
 ```
 
-Focused regressions cover normalized multi-client/year records, identity matching and ambiguity, validation-feedback retry, safe SDK errors/debug logging, draft provenance, preparer edits, and original/corrected-value conflicts. Actual Chromium regressions prove automatic separate sessions, owned-document AI choices, native readback, review display, and no automatic submission. Automated model tests use isolated transports; a separate live Gemini check combined the bundled Priya Nair TXT and Luis Ortega PDF and returned distinct 2025/2026 client drafts with normalized intake values. No private uploaded documents were sent during that verification. This does not establish accuracy on real returns, real TaxSlayer access, or production security approval.
+These commands do not provision firm integrations or qualify a licensed Sigma profile. Use synthetic data only.
 
-The editable-review Chromium scenario verified local drafts surviving polling, whole-field email/date/select/checkbox changes, matching browser readback, source viewing, and explicitly confirmed native submission. Native preview scrolling measured 60.0 position updates/second, with a 16.7 ms p95 interval and 16.8 ms maximum in that local headless run; scrolling sent no browser-action requests. These measurements are not a hardware-independent latency guarantee. The full-page browser image refreshes approximately once per second; local scrolling runs independently at the display cadence.
+In the synthetic Web review, a separate headed Chromium window acts as the native tax form. Its focused field selects versioned source evidence in the companion. Browsing sources or using evidence Back/Forward leaves the native form alone. The companion does not sign, file, transmit, or amend returns. See the [design and acceptance boundaries](docs/LOCAL_COMPANION_DESIGN.md) and the [local API security model](docs/LOCAL_API_AUTHENTICATION.md).
 
-The companion uses a per-launch API header token and Host/Origin checks. Its separate browser context sends no companion credentials to the intake website. It does not inject a bridge, call target JavaScript helpers, or directly submit to the target API; the original website's own submit handler performs its normal request. Real TaxSlayer requires written authorization, authorized account/environment access, and separate ProWeb/Pro Desktop adapters. Playwright does not automate native Pro Desktop. Production approval, storage/security controls, quality thresholds, and packaging remain open in the [design checklist](docs/LOCAL_COMPANION_DESIGN.md).
+### Verification
+
+```bash
+pip install -r requirements.txt -r review-requirements.txt
+SIGMA_RELEASE_TESTS=1 python -m pytest -q
+```
+
+Run the synthetic release check on Linux after building the frontend and installing Chromium. Point `SIGMA_TEST_POSTGRES_SOCKET` at the absolute socket directory of a disposable local PostgreSQL instance and set `SIGMA_TEST_POSTGRES_PORT` if it is not `5432`. Set `SIGMA_TEST_DISPLAY` to a test X11 display to exercise separate headed windows. `SIGMA_RELEASE_TESTS=1` makes reported skips fail an otherwise successful pytest run. These are synthetic checks; they require neither licensed Sigma nor model credentials.
 
 ### Frontend structure
 
@@ -103,10 +99,9 @@ review_ui/src/
     ui/           Shared shadcn buttons, inputs, alerts, progress, and other primitives
     layout/       Application shell
     clients/      Saved client queue
-    intake/       Document upload, consent, file status, and assignment
-    review/       Review workspace and history
+    intake/       Document drop, approval, and per-file status
+    review/       Source-first review and return status
     evidence/     PDF and text evidence viewers
-    automation/   Actual-browser surface and job controls
     routing/      Route loading and error feedback
   hooks/          Reusable workflow hooks
   lib/            API client, schemas, and shared utilities
@@ -116,9 +111,7 @@ review_ui/src/
 
 Use Tailwind utilities and existing shared primitives rather than restoring a component stylesheet. `components.json` configures shadcn, and `@/` resolves to `src/`. Before adding a feature, inspect the package manifest and related components, check installed libraries, and consider an established dependency before writing custom behavior.
 
-The inbox browser regression runs against a temporary workspace and replaces only the external Gemini boundary. It temporarily clears its own API-key environment to check the missing-key state; it never edits `.env`, uses live taxpayer documents, or sends a real model request.
-
-The instructions below describe the original intake-automation demo.
+## Offline portfolio demo
 
 Adapted from [immigration-intake-Form-Agent](https://github.com/AshwinSanthanakrishnan/immigration-intake-Form-Agent). A tax practice has no "case types", so the intake is built around the taxpayer instead: identity and photo ID, home address, tax year, filing status, dependents, income sources and deductions.
 
@@ -138,18 +131,18 @@ Clients also tend to paste their Social Security number or bank details straight
 
 ## What it does
 
-For every file in `sample_inputs/`, the program runs these steps:
+The demo uses local rules by default to process the fictional inquiries in `sample_inputs/`. Optional online mode uses an explicitly selected provider for the exact shipped fixtures only.
 
 | # | Step | What happens |
 |---|---|---|
 | 1 | **Read** | Loads the email from a `.txt`, `.pdf`, `.eml` or `.md` file. |
 | 2 | **Redact** | Masks Social Security numbers, ITINs, and bank account or routing numbers **in code, before any AI call**. The report notes which emails contained them so staff can steer those clients to a secure channel. |
-| 3 | **Extract** | AI pulls out the twelve required details: name, email, phone, date of birth, street address, city, state, ZIP, driver's license number, issuing state, license expiration date, and tax year. It also sets an urgency level with a reason, and captures optional details when the client mentions them: marital status, preferred contact method, license issue date, filing status, number of dependents, occupation, employer, income sources (W-2, 1099/self-employment, interest and dividends, investment sales, rental, retirement, unemployment), deductions and credits (mortgage, charitable, education, student loans, childcare, medical, IRA/HSA, marketplace insurance), whether an IRS or state notice was received, any deadline, whether they want a consultation, and a one-line summary. The result is checked against strict rules. If the answer is invalid it retries once, then flags the record for a person. |
-| 4 | **Decide** | If any required detail is missing, the record is **not submitted**. The AI drafts a polite follow-up email asking for exactly what's missing, saved for staff to review. |
+| 3 | **Extract** | Extracts the contact, identity and tax-year fields required by the local form, along with urgency and available optional tax-profile details. |
+| 4 | **Decide** | If any required detail is missing, the record is **not submitted**. The demo saves a draft follow-up for staff review. |
 | 5 | **Fill the form** | For complete records, a browser (Playwright) opens the intake form, finds each field by its label, types or checks every value, and clicks Submit. You can watch it happen. |
 | 6 | **Verify** | The program checks that a confirmation and intake ID appeared **and** that the intake system stored the same details. It marks the record PASS or FAIL and saves a screenshot. |
-| 7 | **Checklist** | For each accepted client, the AI drafts a document checklist from their tax profile (income sources, deductions, dependents, notices), marked as a draft for preparer review. |
-| 8 | **Report** | Writes `outputs/run_report.pdf` with counts, PASS/FAIL, timings, every client's details, confirmation screenshots and next steps for staff. A Markdown copy (`run_report.md`) is saved next to it. |
+| 7 | **Checklist** | For each accepted demo client, drafts a document checklist from their tax profile for preparer review. |
+| 8 | **Report** | Writes a Markdown report and, when PDF rendering succeeds, a PDF copy in the run directory. |
 
 One bad file never stops the run. The problem is recorded in the report and the next file is processed.
 
@@ -165,27 +158,22 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-
-cp .env.example .env
-```
-
-Open `.env` and replace `your-gemini-api-key` with your own [Google Gemini API key](https://aistudio.google.com/apikey). To use Claude instead, leave `GEMINI_API_KEY` unset and set `ANTHROPIC_API_KEY` (the default Claude model is `claude-opus-5-5`). The `.env` file is ignored by git, so your key is never uploaded.
-
-Then run it:
-
-```bash
 python main.py
 ```
 
-A browser window opens and fills in the form for each client. Results appear in the `outputs/` folder.
+A browser window opens the local demo form. Results go to a fresh `outputs/runs/run-*` directory. No API key is needed, and an API key in the environment does not enable online mode.
 
-### No API key?
+### Optional online synthetic run
+
+Set `GEMINI_API_KEY` for Gemini or `ANTHROPIC_API_KEY` for Claude in your environment or local `.env` (see `.env.example`). Explicitly select one provider:
 
 ```bash
-python main.py --offline
+python main.py --online-synthetic gemini
+# Or:
+python main.py --online-synthetic claude
 ```
 
-This replaces the AI with simple keyword rules so you can see the whole flow without a key. Everything it produces is labeled as offline output.
+The CLI checks the filenames and SHA-256 digests of the exact ten shipped fixtures listed below, then processes a private copy of those verified bytes. Missing, changed or additional supported inputs fail validation. `--inputs` cannot be combined with `--online-synthetic`; the CLI does not fall back to another provider.
 
 ### Other options
 
@@ -193,14 +181,13 @@ This replaces the AI with simple keyword rules so you can see the whole flow wit
 |---|---|
 | `python main.py --headless` | Runs the browser invisibly. |
 | `python main.py --slow-mo 800` | Slows browser actions, useful for screen recordings. |
-| `python main.py --inputs my_folder` | Reads emails from a different folder. |
-| `python main.py --model <name>` | Uses a different Gemini (or Claude) model. |
+| `python main.py --inputs my_folder` | Reads fictional emails from a different folder in offline mode. |
+| `python main.py --offline` | Explicitly selects the default local rule-based mode. |
+| `python main.py --online-synthetic gemini --model <name>` | Overrides the selected provider's model; `--model` requires online mode. |
 | `./run.sh` | Sets up the environment if needed, then runs the project. |
 | `python -m pytest` | Runs the tests (no internet or API key needed; the end-to-end test uses Playwright's Chromium). |
 
-The program exits with code `0` if every submitted record verified, and `1` if there was a verification failure or an error.
-
-> **Free-tier note:** Gemini's free plan limits how many requests you can make per minute. With all 10 sample files the run slows down while it waits, and a record may be flagged for human review if the limit isn't lifted in time. A paid key, or running on fewer files, avoids this.
+The demo exits `0` when there is no technical processing failure, `1` for a processing, verification or checklist failure, and `2` for setup or command-line errors. An expected follow-up for missing information does not itself fail the run.
 
 ## Sample data
 
@@ -221,27 +208,17 @@ The program exits with code `0` if every submitted record verified, and `1` if t
 
 ## What you get
 
-After a run, the `outputs/` folder contains:
+Each `outputs/runs/run-*` directory holds the reports and artifacts from one run:
 
 | Path | Contents |
 |---|---|
-| `run_report.pdf` | The summary of the whole run. Start here. |
-| `run_report.md` | The same report as Markdown. |
+| `run_report.md` | Summary of the whole run. |
+| `run_report.pdf` | PDF copy, when rendering succeeds. |
 | `screenshots/` | A screenshot of each confirmation page. |
 | `followups/` | Draft replies to clients with missing information. |
 | `checklists/` | Draft document checklists, one per accepted client. |
 | `needs_review/` | Records the AI couldn't process reliably, for a person to handle. |
 | `logs/` | A detailed log of each run. |
-
-Example from an offline run on the sample files:
-
-| Source | Client | Tax year | Urgency | Outcome | Verification |
-|---|---|---|---|---|---|
-| 01_w2_extension_priya_nair.txt | Priya Nair | 2025 | High | Submitted | PASS |
-| 02_joint_return_planning_daniel_okafor.txt | Daniel Okafor | 2026 | Low | Submitted | PASS |
-| 03_freelancer_unfiled_messy.txt | Marcus Bell | 2025 | High | Follow-up drafted | n/a |
-| 06_irs_notice_cp2000_angela_brooks.pdf | Angela Brooks | 2024 | High | Submitted | PASS |
-| 10_unfiled_years_levy_notice_terrence_walker.pdf | Terrence Walker | 2024 | High | Follow-up drafted | n/a |
 
 | The form, filled in by the browser | The verified confirmation |
 |---|---|
@@ -251,7 +228,7 @@ Example from an offline run on the sample files:
 
 | File | Job |
 |---|---|
-| `main.py` | The single command that runs everything. |
+| `main.py` | Runs the independent local portfolio demo. |
 | `src/input_reader.py` | Finds and reads the email files, including PDFs. |
 | `src/redaction.py` | Masks SSNs, ITINs and bank numbers before anything reaches the AI. |
 | `src/ai_client.py` | Talks to the AI and holds the instructions it is given. |
@@ -264,22 +241,17 @@ Example from an offline run on the sample files:
 | `src/reporting.py` | Builds the run report (Markdown). |
 | `src/report_pdf.py` | Renders the run report as a PDF. |
 | `src/pipeline.py` | Runs the steps above for each file. |
-| `src/offline_ai.py` | The keyword-rule stand-in used by `--offline`. |
+| `src/offline_ai.py` | The default local keyword-rule engine. |
 | `intake_form/index.html` | The demo intake form. |
 | `tests/` | Automated tests, including an end-to-end browser test. |
-
-### Pointing it at your firm's own form
-
-The form filler finds every field by its visible label (`FORM_FIELDS` in `src/models.py`) and selects checkboxes by their label text. To use a different intake form, change those labels to match it, and change `run_pipeline` in `src/pipeline.py` to open that form's URL instead of starting the local demo server.
 
 ## Privacy and safety
 
 - **Fictional data only.** Every person, address, email, phone number and ID number in the project is made up, and so is the firm named on the form.
-- **No real websites.** The browser only visits the practice form served from your own computer. The only outside connection is to the AI provider.
-- **SSNs and bank details never reach the AI.** Social Security numbers, ITINs, and bank account and routing numbers are masked in code before extraction or drafting. The prompts also tell the model never to extract them. Follow-up emails never ask for them.
-- **ID numbers are masked in output.** The driver's license number is a required intake field, so it is sent to the AI and entered on the form. The confirmation page, run report, PDF and logs show only its last four characters.
+- **Local practice form only.** The browser visits the local demo server. The default mode makes no external AI requests; explicit online mode uses the selected provider for verified synthetic fixtures.
+- **Redaction before extraction.** The demo masks recognized Social Security, ITIN and bank-account or routing-number patterns in code. This does not authorize using real data.
+- **Driver's license fields.** The local form requires a driver's license number, which may be included in synthetic online extraction. The confirmation page and reports mask the number.
 - **Humans stay in control.** Nothing is ever sent to a client. Follow-ups are saved as drafts marked `DRAFT - NOT SENT`, and checklists are marked `DRAFT FOR PREPARER REVIEW. NOT TAX ADVICE.` The program adds these labels itself, so the AI can't leave them out.
 - **Incomplete means not submitted.** A record with missing details is never entered into the system. The program, not the AI, decides what counts as missing.
 - **Share as little as possible.** The checklist step sends the AI only the tax profile (tax year, state, filing status, dependents count, income and deduction categories), never the client's name, contact details, address, date of birth or ID numbers.
-- **Secrets stay local.** Your API key lives in `.env`, which git ignores, and is never logged. The `outputs/` folder is also ignored, because in real use it would hold client information.
-- **In production,** the form filler would point at the firm's real intake system instead of the local practice form. It would also need access controls, audit logging, a retention policy for stored data, a review of how the AI provider handles taxpayer information, and compliance with the firm's IRS Publication 4557 / FTC Safeguards Rule security plan.
+- **Keep credentials and artifacts private.** `.env` and `outputs/` are ignored by git. Neither the portfolio demo nor the companion is authorized for live taxpayer data.

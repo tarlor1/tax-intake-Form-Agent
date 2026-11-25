@@ -52,7 +52,7 @@ def test_gemini_ai_extract_success():
     parsed = IntakeExtraction.model_validate_json(result_raw)
     assert parsed.full_name == "Test Client"
     assert parsed.tax_year == 2025
-    assert ai.usage_summary() == "1 Gemini API call(s), 100 input / 50 output tokens"
+    assert ai.usage_summary() == "1 Gemini API response(s), 100 input / 50 output tokens"
 
 
 def test_gemini_ai_declined_error():
@@ -103,7 +103,7 @@ def test_gemini_ai_draft_followup():
 
     draft = ai.draft_followup("email text", record)
     assert "Missing Information" in draft
-    assert ai.usage_summary() == "1 Gemini API call(s), 100 input / 50 output tokens"
+    assert ai.usage_summary() == "1 Gemini API response(s), 100 input / 50 output tokens"
 
 
 def test_gemini_ai_draft_checklist():
@@ -128,3 +128,17 @@ def test_gemini_extraction_schema_asks_for_every_field():
 
     assert set(ai._schema["required"]) == set(IntakeExtraction.model_fields)
     assert "$ref" not in json.dumps(ai._schema)
+
+
+def test_unavailable_gemini_never_switches_models_or_logs_provider_error(monkeypatch, caplog):
+    mock_client = MagicMock()
+    request = mock_client.models.generate_content
+    request.side_effect = RuntimeError("503 SYNTHETIC_PRIVATE_PROVIDER_ERROR")
+    monkeypatch.setattr("src.ai_client.time.sleep", lambda _: None)
+    ai = GeminiAI(model="test-authorized-model", client=mock_client)
+
+    with pytest.raises(RuntimeError, match=r"^Gemini API request failed$"):
+        ai.extract("Synthetic intake")
+
+    assert [call.kwargs["model"] for call in request.call_args_list] == ["test-authorized-model"] * 4
+    assert "SYNTHETIC_PRIVATE_PROVIDER_ERROR" not in caplog.text

@@ -1,28 +1,19 @@
 import { z } from 'zod';
 import { expireSession, isSessionExpired, SESSION_EXPIRED_MESSAGE } from './session';
 import {
-  browserStateSchema,
-  detailSchema,
-  inboxDocumentSchema,
-  intakeSchema,
+  batchSchema,
+  batchFileSchema,
+  evidenceDetailSchema,
+  reviewDecisionSchema,
+  reviewOpenedSchema,
+  reviewSelectionSchema,
+  intakeClientSchema,
+  intakeSettingsSchema,
   jobSchema,
   summarySchema,
 } from './apiSchemas';
-import type { Field } from './apiSchemas';
-export type {
-  ReturnSummary,
-  SourceDocument,
-  Citation,
-  Candidate,
-  Field,
-  ReviewEvent,
-  ReturnDetail,
-  Job,
-  BrowserState,
-  InboxDocument,
-  InboxGroup,
-  IntakeState,
-} from './apiSchemas';
+import type { BatchFile, ClientAssignment, MediaType, ReviewSelection } from './apiSchemas';
+export type { Job, ReturnSummary } from './apiSchemas';
 
 export class ApiError extends Error {
   constructor(
@@ -110,90 +101,115 @@ async function decode<T>(response: Response, schema: z.ZodType<T>): Promise<T> {
 
 const returnPath = (id: string) => `/returns/${encodeURIComponent(id)}`;
 
-export interface RevisionCommand {
-  expectedRevision: number;
+export interface ReviewIdentity {
+  reviewSessionId: string;
+  returnId: string;
+  inputRevision: string;
 }
-export interface SelectCommand extends RevisionCommand {
-  fieldId: string;
+
+export async function streamReviewSelections(
+  scope: ReviewIdentity,
+  signal: AbortSignal,
+  publish: (selection: ReviewSelection) => void,
+) {
+  const response = await request(`${returnPath(scope.returnId)}/review/events`, {
+    signal,
+    headers: { 'X-Review-Session': scope.reviewSessionId, Accept: 'text/event-stream' },
+  });
+  if (!response.body || !response.headers.get('Content-Type')?.startsWith('text/event-stream')) {
+    throw new Error('The local review stream is unavailable.');
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  try {
+    for (; ;) {
+      const { done, value } = await reader.read();
+      if (done || signal.aborted) return;
+      buffer += value;
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const match = /^event: selection\ndata: (.+)$/.exec(frame);
+        if (!match || frame.length > 2048) throw new Error('Invalid native selection event.');
+        const selection = reviewSelectionSchema.parse(JSON.parse(match[1]));
+        if (
+          selection.reviewSessionId !== scope.reviewSessionId ||
+          selection.returnId !== scope.returnId ||
+          selection.inputRevision !== scope.inputRevision
+        ) throw new Error('Native selection is outside this review reservation.');
+        if (!signal.aborted) publish(selection);
+        boundary = buffer.indexOf('\n\n');
+      }
+      if (buffer.length > 2048) throw new Error('Invalid native selection event.');
+    }
+  } finally {
+    await reader.cancel().catch(() => { });
+    reader.releaseLock();
+  }
 }
-export interface ResolveCommand extends SelectCommand {
-  candidateId: string;
-  reason?: string;
+
+interface DropManifest {
+  batchId: string;
+  files: { slot: string; filename: string; mediaType: MediaType }[];
+  approvedForAI: boolean;
+  returnHint?: string;
+  assignment?: ClientAssignment;
 }
-export interface ApplyFieldCommand extends SelectCommand {
-  value: string;
-  reason?: string;
+
+const batchesPath = (returnId?: string) => `${returnId ? returnPath(returnId) : ''}/intake/batches`;
+
+function batchFilePath(batchId: string, slot: string) {
+  return `/intake/batches/${encodeURIComponent(batchId)}/files/${encodeURIComponent(slot)}`;
 }
-export type BrowserAction =
-  | { kind: 'click'; x: number; y: number }
-  | { kind: 'wheel'; x: number; y: number; deltaY: number }
-  | { kind: 'key'; key: string }
-  | { kind: 'text'; text: string }
-  | { kind: 'focus'; fieldId: string };
+
+export type InboxEvidenceFile = BatchFile & { uploadId: string; versionId: string };
+
+async function decodeInboxEvidence(response: Response, slot: string): Promise<InboxEvidenceFile> {
+  const file = await decode(response, batchFileSchema);
+  if (file.slot !== slot || file.state !== 'uploaded' || !file.uploadId || !file.versionId) {
+    throw new Error('The evidence does not identify the requested committed file.');
+  }
+  return { ...file, uploadId: file.uploadId, versionId: file.versionId };
+}
 
 export const api = {
   async returns(signal?: AbortSignal) {
     return decode(await request('/returns', { signal }), z.array(summarySchema));
   },
-  async detail(id: string, signal?: AbortSignal) {
-    const detail = await decode(await request(returnPath(id), { signal }), detailSchema);
-    if (detail.id !== id) throw new Error('The server returned a different return identity.');
+  async evidence(id: string, revision?: string, signal?: AbortSignal) {
+    const query = revision === undefined ? '' : `?${new URLSearchParams({ revision })}`;
+    const detail = await decode(await request(`${returnPath(id)}/evidence${query}`, { signal }), evidenceDetailSchema);
+    if (detail.id !== id || (revision !== undefined && detail.inputRevision !== revision)) {
+      throw new Error('The evidence revision is outside this return.');
+    }
     return detail;
   },
-  async browserState(id: string, signal?: AbortSignal) {
-    return decode(await request(`${returnPath(id)}/browser`, { signal }), browserStateSchema);
+  async original(id: string, revision: string, doc: string, version: string, signal?: AbortSignal) {
+    const path = `/review/originals/${encodeURIComponent(doc)}/${encodeURIComponent(version)}`;
+    return request(`${returnPath(id)}${path}?${new URLSearchParams({ revision })}`, { signal });
   },
-  async interact(id: string, jobId: string, action: BrowserAction & { reason?: string }) {
-    return decode(
-      await request(`${returnPath(id)}/jobs/${encodeURIComponent(jobId)}/interact`, {
-        method: 'POST',
-        body: JSON.stringify(action),
-      }),
-      jobSchema,
-    );
+  async openReview(id: string, inputRevision: string) {
+    return decode(await request(`${returnPath(id)}/review/open`, {
+      method: 'POST', body: JSON.stringify({ inputRevision }),
+    }), reviewOpenedSchema);
   },
-  async chooseSource(id: string, jobId: string, body: ResolveCommand) {
-    return decode(
-      await request(`${returnPath(id)}/jobs/${encodeURIComponent(jobId)}/source`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
-      jobSchema,
-    );
+  async closeReview(scope: ReviewIdentity) {
+    await request(`${returnPath(scope.returnId)}/review/close`, {
+      method: 'POST', body: JSON.stringify({ reviewSessionId: scope.reviewSessionId }),
+    });
   },
-  async applyField(id: string, jobId: string, body: ApplyFieldCommand) {
-    return decode(
-      await request(`${returnPath(id)}/jobs/${encodeURIComponent(jobId)}/field`, {
-        method: 'POST',
-        body: JSON.stringify(body),
+  async reviewDecision(
+    scope: ReviewIdentity, expectedDecisionVersion: number, expectedFieldVersion: number,
+    decision: { kind: 'mark_reviewed' } | { kind: 'choose_source'; bindingId: string; candidateId: string },
+  ) {
+    return decode(await request(`${returnPath(scope.returnId)}/review/decisions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        ...decision, inputRevision: scope.inputRevision,
+        reviewSessionId: scope.reviewSessionId, expectedDecisionVersion, expectedFieldVersion,
       }),
-      jobSchema,
-    );
-  },
-  async submitBrowser(id: string, jobId: string, body: RevisionCommand) {
-    return decode(
-      await request(`${returnPath(id)}/jobs/${encodeURIComponent(jobId)}/submit`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
-      jobSchema,
-    );
-  },
-  async upload(id: string, expectedRevision: number, file: File) {
-    return decode(
-      await request(`${returnPath(id)}/documents`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.name.toLowerCase().endsWith('.txt')
-            ? 'text/plain'
-            : 'application/pdf',
-          'X-Document-Name': encodeURIComponent(file.name),
-          'X-Expected-Revision': String(expectedRevision),
-        },
-        body: file,
-      }),
-      detailSchema,
-    );
+    }), reviewDecisionSchema);
   },
   async jobs(id: string, signal?: AbortSignal) {
     const jobs = await decode(
@@ -204,119 +220,51 @@ export const api = {
       throw new Error('A job belongs to a different return.');
     return jobs;
   },
-  async startJob(id: string, body: RevisionCommand) {
-    return decode(
-      await request(`${returnPath(id)}/jobs`, { method: 'POST', body: JSON.stringify(body) }),
-      jobSchema,
-    );
+  async intakeSettings(signal?: AbortSignal) {
+    return decode(await request('/intake', { signal }), intakeSettingsSchema);
   },
-  async cancelJob(id: string, jobId: string) {
-    return decode(
-      await request(`${returnPath(id)}/jobs/${encodeURIComponent(jobId)}/cancel`, {
-        method: 'POST',
-        body: '{}',
-      }),
-      jobSchema,
-    );
+  async intakeClients(signal?: AbortSignal) {
+    return decode(await request('/intake/clients', { signal }), z.array(intakeClientSchema));
   },
-  async pdf(returnId: string, documentId: string, signal: AbortSignal): Promise<Uint8Array> {
-    const response = await request(
-      `${returnPath(returnId)}/documents/${encodeURIComponent(documentId)}/pdf`,
-      { signal },
-    );
-    return new Uint8Array(await response.arrayBuffer());
+  async createClient(name: string) {
+    return decode(await request('/intake/clients', {
+      method: 'POST', body: JSON.stringify({ name }),
+    }), intakeClientSchema);
   },
-  async text(returnId: string, documentId: string, signal: AbortSignal) {
-    return (
-      await request(`${returnPath(returnId)}/documents/${encodeURIComponent(documentId)}/text`, {
-        signal,
-      })
-    ).text();
+  async assignSlot(batchId: string, slot: string, assignment: ClientAssignment) {
+    return decode(await request(`${batchFilePath(batchId, slot)}/assignment`, {
+      method: 'PUT', body: JSON.stringify(assignment),
+    }), batchSchema);
   },
-  async intake(signal?: AbortSignal) {
-    return decode(await request('/intake', { signal }), intakeSchema);
+  async batches(signal?: AbortSignal, returnId?: string) {
+    return decode(await request(batchesPath(returnId), { signal }), z.array(batchSchema));
   },
-  async uploadInbox(file: File) {
-    return decode(
-      await request('/intake/documents', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.name.toLowerCase().endsWith('.txt')
-            ? 'text/plain'
-            : 'application/pdf',
-          'X-Document-Name': encodeURIComponent(file.name),
-        },
-        body: file,
-      }),
-      inboxDocumentSchema,
-    );
+  async declareDrop(manifest: DropManifest, returnId?: string) {
+    return decode(await request(batchesPath(returnId), {
+      method: 'POST', body: JSON.stringify(manifest),
+    }), batchSchema);
   },
-  async processDocuments(documentIds: string[], approvedForAI: boolean) {
-    return decode(
-      await request('/intake/process', {
-        method: 'POST',
-        body: JSON.stringify({ documentIds, approvedForAI }),
-      }),
-      z.array(inboxDocumentSchema),
-    );
+  async uploadSlot(batchId: string, slot: string, mediaType: MediaType, file: File) {
+    return decode(await request(batchFilePath(batchId, slot), {
+      method: 'PUT', headers: { 'Content-Type': mediaType }, body: file,
+    }), batchSchema);
   },
-  async extract(id: string, expectedRevision: number, approvedForAI: boolean) {
-    return decode(
-      await request(`${returnPath(id)}/extract`, {
-        method: 'POST',
-        body: JSON.stringify({ expectedRevision, approvedForAI }),
-      }),
-      z.array(inboxDocumentSchema),
-    );
+  async inboxEvidence(batchId: string, slot: string, signal?: AbortSignal): Promise<InboxEvidenceFile> {
+    return decodeInboxEvidence(await request(`${batchFilePath(batchId, slot)}/evidence`, { signal }), slot);
   },
-  async assign(
-    documentId: string,
-    body: {
-      groupId: string;
-      returnId?: string;
-      clientName?: string;
-      taxYear?: number;
-      returnType?: 'individual' | 'business';
-    },
-  ) {
-    return decode(
-      await request(`/intake/documents/${encodeURIComponent(documentId)}/assign`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
-      inboxDocumentSchema,
-    );
+  async approveInboxPractice(batchId: string, slot: string) {
+    return decodeInboxEvidence(await request(`${batchFilePath(batchId, slot)}/practice`, { method: 'POST' }), slot);
   },
-  async browserFrame(returnId: string, jobId: string, signal: AbortSignal): Promise<Blob | null> {
-    const response = await request(
-      `${returnPath(returnId)}/jobs/${encodeURIComponent(jobId)}/frame`,
-      { signal },
-    );
-    return response.status === 204 ? null : response.blob();
+  async inboxOriginal(batchId: string, slot: string, signal?: AbortSignal) {
+    return request(`${batchFilePath(batchId, slot)}/original`, { signal });
+  },
+  async excludeSlot(batchId: string, slot: string) {
+    return decode(await request(`${batchFilePath(batchId, slot)}/exclude`, { method: 'POST' }), batchSchema);
   },
 };
 
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : 'An unexpected error occurred.';
-
-export function fieldValue(field: Pick<Field, 'kind' | 'value'>): string {
-  if (field.value === null || field.value === '') return 'Missing';
-  if (field.kind === 'money') {
-    const amount = Number(field.value);
-    if (Number.isFinite(amount))
-      return amount.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-  }
-  if (field.kind === 'multi') {
-    try {
-      const values: unknown = JSON.parse(field.value);
-      if (Array.isArray(values) && values.every(value => typeof value === 'string'))
-        return values.join(', ') || 'None selected';
-    } catch {
-      /* Historical values remain visible verbatim. */
-    }
-  }
-  return field.value;
-}
 
 export function dateLabel(value: string): string {
   const parsed = new Date(value);

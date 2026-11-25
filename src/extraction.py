@@ -27,7 +27,6 @@ class ExtractionResult:
     record: IntakeExtraction | None
     attempts: int = 0
     errors: list[str] = field(default_factory=list)
-    raw_outputs: list[str] = field(default_factory=list)
 
     @property
     def needs_human_review(self) -> bool:
@@ -44,9 +43,13 @@ def parse_extraction(raw: str) -> IntakeExtraction:
 
 def describe_validation_error(exc: ValidationError) -> str:
     parts = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error["loc"]) or "(root)"
-        parts.append(f"{location}: {error['msg']}")
+    for error in exc.errors(include_input=False, include_context=False, include_url=False):
+        loc = error["loc"]
+        location = loc[0] if loc and loc[0] in IntakeExtraction.model_fields else "(root)"
+        if location == "urgency" and len(loc) > 1 and loc[1] in ("level", "reason"):
+            location += f".{loc[1]}"
+        # Validator messages and unexpected JSON keys can echo untrusted response text.
+        parts.append(f"{location}: {error['type']}")
     return "; ".join(parts)
 
 
@@ -58,12 +61,11 @@ def extract_intake(email_text: str, ai: IntakeAI, max_attempts: int = MAX_ATTEMP
         result.attempts = attempt
         try:
             raw = ai.extract(email_text, previous_error=validation_error)
-        except AIOutputError as exc:
-            result.errors.append(f"attempt {attempt}: {exc}")
-            log.warning("Extraction attempt %d/%d returned no usable output: %s", attempt, max_attempts, exc)
+        except AIOutputError:
+            result.errors.append(f"attempt {attempt}: AI returned no usable output")
+            log.warning("Extraction attempt %d/%d returned no usable output", attempt, max_attempts)
             continue
 
-        result.raw_outputs.append(raw)
         try:
             result.record = parse_extraction(raw)
             return result

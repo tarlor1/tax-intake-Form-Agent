@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -95,7 +96,7 @@ def test_report_contains_summary_rows_and_relative_links():
     assert "| Emails with an SSN or bank number (redacted) | 1 |" in report
     assert "**Attention needed:** 1 verification failure(s), 1 error(s)." in report
     assert "| 1 | a.txt | Ana One | 2025 | High | Submitted | TAX-20261019-AAAA | PASS | 2.5 s |" in report
-    assert "| 2 | b.txt | Ben Two | 2025 | High | Submitted | - | FAIL |" in report
+    assert "| 2 | b.txt | Ben Two | 2025 | High | Submission unverified | - | FAIL |" in report
     assert "| 3 | c.txt | Cy Three | 2025 | High | Follow-up drafted | - | n/a |" in report
     assert "| 4 | d.txt | - | - | - | Needs human review | - | n/a |" in report
     assert "[TAX-20261019-AAAA.png](screenshots/TAX-20261019-AAAA.png)" in report
@@ -113,6 +114,14 @@ def test_report_never_shows_the_full_license_number():
     assert "41827730" not in report
     assert "41827730" not in html
     assert "| Driver's license / state ID number | ••••7730 |" in report
+
+
+def test_report_fully_masks_four_character_license():
+    results = [RecordResult("a.txt", Outcome.FOLLOW_UP, make_record(drivers_license_number="F7T2", phone=None))]
+    summary = summarize(results, 1.0)
+    for report in (render_report(results, summary, INFO, OUTPUTS), render_report_html(results, summary, INFO)):
+        assert "F7T2" not in report
+        assert "••••" in report
 
 
 def test_report_for_a_clean_run():
@@ -177,3 +186,48 @@ def test_pdf_html_escapes_client_text():
 def test_format_duration():
     assert format_duration(4.26) == "4.3 s"
     assert format_duration(75) == "1 min 15 s"
+
+
+def test_verified_intake_with_failed_checklist_keeps_pass_and_requires_attention():
+    results = [
+        RecordResult(
+            "a.txt", Outcome.SUBMITTED, make_record(), 1,
+            verified=True, checklist_failed=True, error="checklist: RuntimeError",
+        )
+    ]
+    summary = summarize(results, 1.0)
+
+    assert summary.submitted == summary.passed == summary.checklist_failures == 1
+    assert summary.failed == summary.errors == 0
+    assert summary.needs_attention
+    for report in (render_report(results, summary, INFO, OUTPUTS), render_report_html(results, summary, INFO)):
+        assert "Draft failed after verified submission." in report
+        assert "1 checklist failure(s)." in report
+        assert "Prepare 1 missing document checklist(s)" in report
+        assert "Preparer review of 1 document checklist draft(s)" not in report
+
+
+def test_reports_identify_custom_offline_and_authorized_online_processing():
+    summary = summarize([], 0.1)
+    for info, source, expected, forbidden in (
+        (replace(INFO, custom_inputs=True), "Custom input folder", "No external AI requests", "fictional"),
+        (replace(INFO, online_provider="claude"), "Verified bundled synthetic samples",
+         "Online AI processing via Claude was authorized", "No external AI requests"),
+    ):
+        for report in (render_report([], summary, info, OUTPUTS), render_report_html([], summary, info)):
+            assert source in report
+            assert expected in report
+            assert forbidden not in report
+            assert "No client messages were sent or tax returns filed." in report
+
+
+def test_reports_do_not_export_failure_screenshots(tmp_path):
+    screenshot = tmp_path / "failure.png"
+    screenshot.write_bytes(b"synthetic legacy artifact")
+    results = [RecordResult("a.txt", Outcome.SUBMITTED, verified=False, artifacts=[screenshot])]
+    summary = summarize(results, 1.0)
+
+    assert screenshot.name not in render_report(results, summary, INFO, tmp_path)
+    html = render_report_html(results, summary, INFO)
+    assert "data:image/png" not in html
+    assert "Verified local intake ID" not in html

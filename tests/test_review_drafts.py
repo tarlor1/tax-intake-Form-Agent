@@ -8,7 +8,6 @@ import pytest
 
 from src.review_documents import source_pages
 from src.review_store import ReviewError, ReviewStore
-from src.review_target import fillable_values, form_payload
 
 
 CONTENT = b"Client contact notes\nPhone: 503-555-0142\n"
@@ -58,7 +57,7 @@ def literal_phone(value="503-555-0142"):
     }
 
 
-def test_ai_drafts_normalize_fill_native_values_and_reference_only_original(store, detail):
+def test_archived_ai_drafts_reference_only_their_original(store, detail):
     notes = "Summary drawn from the complete intake document. " * 30
     extracted = [
         {"fieldId": "full_name", "value": "Avery Morgan"},
@@ -82,20 +81,10 @@ def test_ai_drafts_normalize_fill_native_values_and_reference_only_original(stor
         assert item["selectedCandidateId"] == candidate["id"]
         assert candidate["provenance"] == "gemini"
         assert candidate["documentId"] == document["id"]
-    before_fill = copy.deepcopy(saved)
-    values, _ = fillable_values(saved)
-    assert values == {
-        "full_name": "Avery Morgan",
-        "tax_year": "2025",
-        "state": "OR",
-        "number_of_dependents": "0",
-        "income_sources": ["w2_wages", "rental"],
-        "deductions": [],
-        "notes": notes.strip(),
-    }
-    assert form_payload(saved)["phone"] == ""
-    assert form_payload(saved)["notes"] == notes.strip()
-    assert saved == before_fill
+    assert field(saved, "state")["value"] == "OR"
+    assert field(saved, "number_of_dependents")["value"] == "0"
+    assert field(saved, "notes")["value"] == notes.strip()
+    assert field(saved, "phone")["value"] is None
     assert import_values(store, saved, extracted) == saved
     assert ReviewStore(store.data_dir).get_return(saved["id"]) == saved
 
@@ -112,7 +101,6 @@ def test_conflicting_drafts_preserve_original_and_need_explicit_resolution(store
     assert item["valueOrigin"] == "ai"
     assert item["conflict"] and item["status"] == "blocked"
     assert [candidate["value"] for candidate in item["candidates"]] == [first["value"], second["value"]]
-    assert "phone" not in fillable_values(saved)[0]
     assert import_values(store, saved, [first]) == saved
     saved = store.resolve(
         saved["id"], saved["revision"], "phone", item["candidates"][-1]["id"], "Confirmed with client"
@@ -124,7 +112,6 @@ def test_conflicting_drafts_preserve_original_and_need_explicit_resolution(store
     assert chosen["citations"] == []
     assert len(chosen["candidates"]) == 2
     assert "AI draft from contact.txt" in saved["events"][-1]["message"]
-    assert fillable_values(saved)[0]["phone"] == second["value"]
 
 
 @pytest.mark.parametrize("human_value", ["503-555-0142", "503-555-0999", ""])
@@ -140,10 +127,6 @@ def test_drafts_never_replace_or_retag_preparer_edits(store, detail, human_value
     assert item["conflict"] == (human_value != "503-555-0142")
     assert item["status"] == ("blocked" if item["conflict"] else "needs_review")
     assert len(item["candidates"]) == 1
-    if item["conflict"]:
-        assert "phone" not in fillable_values(saved)[0]
-    else:
-        assert fillable_values(saved)[0]["phone"] == human_value
 
 
 @pytest.mark.parametrize("literal_first", [True, False])
@@ -170,46 +153,6 @@ def test_corroboration_keeps_selected_ai_or_literal_source_provenance(store, det
         saved = store.resolve(saved["id"], saved["revision"], "phone", candidate["id"])
         assert field(saved, "phone")["valueOrigin"] == origin
         assert field(saved, "phone")["status"] == "needs_review"
-        assert fillable_values(saved)[0]["phone"] == "503-555-0142"
-
-
-@pytest.mark.parametrize("origin", ["ai", "source"])
-def test_document_backed_candidate_fills_with_honest_local_source_location(store, detail, origin):
-    saved = import_values(store, detail, [{"fieldId": "phone", "value": "503-555-0142"}])
-    item = field(saved, "phone")
-    item["valueOrigin"] = origin
-    assert fillable_values(saved)[0]["phone"] == "503-555-0142"
-    assert item["status"] == "needs_review"
-    assert item["citations"][0]["quote"] == "Phone: 503-555-0142"
-    assert item["citations"][0]["localMatch"]
-
-
-@pytest.mark.parametrize("origin", ["ai", "source"])
-def test_other_client_original_cannot_support_fill_even_with_same_content(store, detail, origin):
-    saved = import_values(store, detail, [{"fieldId": "phone", "value": "503-555-0142"}])
-    other = store.create_return(2025, client_name="Another Client", return_type="individual")
-    other = import_values(store, other, [{"fieldId": "phone", "value": "503-555-0999"}])
-    foreign = copy.deepcopy(field(saved, "phone"))
-    foreign["valueOrigin"] = origin
-    other["fields"] = [foreign if item["id"] == "phone" else item for item in other["fields"]]
-    assert foreign["candidates"][0]["documentId"] != other["documents"][0]["id"]
-    assert "phone" not in fillable_values(other)[0]
-    assert form_payload(other)["phone"] == ""
-
-
-@pytest.mark.parametrize("change", ["unselected", "different_value", "missing_original", "not_ai"])
-def test_ai_fill_requires_matching_selected_candidate_and_owned_original(store, detail, change):
-    saved = import_values(store, detail, [{"fieldId": "phone", "value": "503-555-0142"}])
-    item = field(saved, "phone")
-    if change == "unselected":
-        item["selectedCandidateId"] = None
-    elif change == "different_value":
-        item["value"] = "503-555-0999"
-    elif change == "missing_original":
-        saved["documents"] = []
-    else:
-        item["candidates"][0]["provenance"] = "unknown"
-    assert "phone" not in fillable_values(saved)[0]
 
 
 def test_invalid_normalized_draft_rolls_back_attached_original(store, detail):

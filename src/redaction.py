@@ -17,8 +17,11 @@ BANK = "bank account/routing number"
 
 # (kind, pattern). A pattern with a group masks only that group, so the label stays readable.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # 123-45-6789 / 123 45 6789: the SSN and ITIN layout (phone numbers are 3-3-4).
-    (SSN, re.compile(r"\b\d{3}[- ]\d{2}[- ]\d{4}\b")),
+    # Prefer an explicit bank label to a generic SSN-shaped fragment within a grouped account.
+    (
+        BANK,
+        re.compile(r"\b(?:account|acct|routing|aba)\s*(?:number|no\.?|#)?\s*[:\-]?\s*(\d[\d -]{4,20}\d)\b", re.I),
+    ),
     # "SSN: 123456789", "social security number 123456789", "ITIN #912345678"
     (
         SSN,
@@ -28,11 +31,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.I,
         ),
     ),
-    # "account number: 000123456789", "routing # 021000021", "acct 4455667788"
-    (
-        BANK,
-        re.compile(r"\b(?:account|acct|routing|aba)\s*(?:number|no\.?|#)?\s*[:\-]?\s*(\d[\d -]{4,20}\d)\b", re.I),
-    ),
+    # 123-45-6789 / 123 45 6789: the SSN and ITIN layout (phone numbers are 3-3-4).
+    (SSN, re.compile(r"\b\d{3}[- ]\d{2}[- ]\d{4}\b")),
 )
 
 

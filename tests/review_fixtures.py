@@ -1,8 +1,4 @@
-"""Explicit synthetic review fixtures for tests only; never loaded by production.
-
-PDF coordinates use letter pages (612 x 792 points). Citation rectangles are
-normalized top-left coordinates around the exact text drawn by ``source``.
-"""
+"""Explicit synthetic review fixtures for tests only; never loaded by production."""
 
 from __future__ import annotations
 
@@ -12,76 +8,11 @@ from typing import Any
 
 from src.review_store import ReviewStore
 from src.review_returns import migrate_return
+from src.sigma_demo.pdf import source
 
-PAGE_WIDTH = 612
-PAGE_HEIGHT = 792
 INDIVIDUAL_ID = "individual-morgan"
 PRIOR_YEAR_ID = "individual-morgan-2024"
 BUSINESS_ID = "business-studio"
-
-
-def _pdf_escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def source(
-    document_id: str, title: str, rows: list[str], version: int = 1
-) -> tuple[dict, bytes, list[dict]]:
-    """Make a real single-page PDF and matching citation regions, without libraries."""
-    commands = [
-        "BT /F1 17 Tf 48 744 Td (" + _pdf_escape(title) + ") Tj ET",
-        "BT /F1 10 Tf 48 718 Td (SYNTHETIC DEMONSTRATION - NOT A FILED TAX DOCUMENT) Tj ET",
-    ]
-    citations = []
-    for index, text in enumerate(rows):
-        baseline_from_top = 130 + index * 34
-        commands.append(
-            f"BT /F2 11 Tf 48 {PAGE_HEIGHT - baseline_from_top} Td ({_pdf_escape(text)}) Tj ET"
-        )
-        citations.append(
-            {
-                "id": f"{document_id}-citation-{index + 1}",
-                "documentId": document_id,
-                "page": 1,
-                "rect": [
-                    46 / PAGE_WIDTH,
-                    (baseline_from_top - 12) / PAGE_HEIGHT,
-                    min(520, len(text) * 6.6 + 4) / PAGE_WIDTH,
-                    17 / PAGE_HEIGHT,
-                ],
-                "quote": text,
-                "label": f"{title}, line {index + 1}",
-            }
-        )
-    commands.append(
-        "BT /F1 9 Tf 48 42 Td (Values are pre-seeded examples. No AI extraction or destination connection.) Tj ET"
-    )
-    stream = "\n".join(commands).encode("ascii")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
-        f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream",
-    ]
-    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for number, body in enumerate(objects, 1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
-    xref = len(pdf)
-    pdf.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
-    for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode())
-    pdf.extend(
-        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
-    )
-    return (
-        {"id": document_id, "title": title, "pageCount": 1, "version": version},
-        bytes(pdf),
-        citations,
-    )
 
 
 def candidate(field_id: str, suffix: str, value: str, citation: dict) -> dict:
@@ -184,7 +115,7 @@ def _individual_scenario() -> dict[str, Any]:
         "clientName": "Avery Morgan",
         "taxYear": 2025,
         "returnType": "individual",
-        "destination": "ProWeb",
+        "destination": "Individual worksheet",
         "revision": 1,
         "activeFieldId": "primary-wages",
         "fields": [
@@ -280,7 +211,7 @@ def _business_scenario() -> dict[str, Any]:
         "clientName": "Sample Studio LLC",
         "taxYear": 2025,
         "returnType": "business",
-        "destination": "Pro Desktop",
+        "destination": "Business worksheet",
         "revision": 1,
         "activeFieldId": "service-receipts",
         "fields": [
@@ -407,7 +338,7 @@ def _prior_year_scenario() -> dict[str, Any]:
         "clientName": "Avery Morgan",
         "taxYear": 2024,
         "returnType": "individual",
-        "destination": "ProWeb",
+        "destination": "Individual worksheet",
         "revision": 1,
         "activeFieldId": "primary-wages",
         "fields": [

@@ -1,10 +1,15 @@
-# Local controller; Gemini calls require a key and explicit approved-data consent.
+# Local companion and preparation components. External model use requires a firm-approved grant.
 fastapi>=0.115,<1
 pydantic>=2.11,<3
 uvicorn>=0.34,<1
 playwright>=1.55,<2
 pdfplumber>=0.11,<1
 google-genai>=2.0,<3
+openai>=2,<3
+anthropic>=0.125,<1
+mcp>=2.3,<3
+psycopg[binary]>=3.2,<4
+pywinauto>=0.6.9,<1; sys_platform == "win32"
 python-dotenv>=1.0,<2
 # Local API tests (no external requests).
 httpx>=0.28,<1

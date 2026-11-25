@@ -1,173 +1,160 @@
-"""Document-first API boundaries and preparer edits without mandatory explanations."""
+"""Public API permits scoped evidence and committed ingestion, never native control."""
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from src.review_api import create_app
+from review_companion_practice import PRIOR, RETURN, REVISION, TOKEN, PracticeCompanion
+from review_fixtures import INDIVIDUAL_ID, seeded_store
+from src.preparation.review_events import ReviewAccess, ReviewSelectionSession
+from src.review_api import _companion_app, create_app
 
-AUTH = {"X-Review-Token": "document-intake-api-test"}
+AUTH = {"X-Review-Token": TOKEN}
+ROOT = f"/api/review/returns/{RETURN}"
 INTAKE = "/api/review/intake"
-RETURNS = "/api/review/returns"
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    # An empty environment value also prevents a developer's .env from enabling calls.
-    monkeypatch.setenv("GEMINI_API_KEY", "")
-    monkeypatch.setenv("GOOGLE_API_KEY", "")
-    ui = tmp_path / "ui"
-    ui.mkdir()
-    (ui / "index.html").write_text('<meta name="review-token" content="__REVIEW_TOKEN__">')
-    app = create_app(tmp_path / "data", ui, port=8765, token=AUTH["X-Review-Token"])
+def ui(tmp_path):
+    folder = tmp_path / "ui"
+    folder.mkdir()
+    (folder / "index.html").write_text('<meta name="review-token" content="__REVIEW_TOKEN__">')
+    return folder
+
+
+@pytest.fixture
+def client(ui):
+    app = _companion_app(ui, port=8765, token=TOKEN, backend=PracticeCompanion(ui / "archive"))
     with TestClient(app, base_url="http://127.0.0.1:8765") as browser:
         yield browser
 
 
-def upload(client, content, *, name="client.txt", media_type="text/plain"):
-    return client.post(
-        INTAKE + "/documents",
-        content=content,
-        headers={**AUTH, "Content-Type": media_type, "X-Document-Name": name},
+def test_deep_link_token_and_protected_revision_and_exact_original(client):
+    response = client.get("/clients/client-synthetic/returns/2025")
+    assert response.status_code == 200 and f'content="{TOKEN}"' in response.text
+    assert "frame-src 'none'" in response.headers["content-security-policy"]
+    assert client.get(ROOT + "/evidence").status_code == 401
+    detail = client.get(ROOT + "/evidence", headers=AUTH).json()
+    assert detail["inputRevision"] == REVISION
+    path = ROOT + "/review/originals/doc-b/original-one"
+    assert client.get(f"{path}?revision={REVISION}").status_code == 401
+    assert client.get(f"{path}?revision={PRIOR}", headers=AUTH).status_code == 404
+    assert client.get(f"{path}?revision={REVISION}", headers=AUTH).content.startswith(b"%PDF")
+    assert client.get(f"{path.replace(RETURN, 'another-return')}?revision={REVISION}", headers=AUTH).status_code == 404
+    assert client.get(f"{path.replace('original-one', 'lost')}?revision={REVISION}", headers=AUTH).status_code == 404
+
+
+@pytest.mark.parametrize("headers", [
+    {"Host": "untrusted.example"}, {"Origin": "https://untrusted.example"}, {"Origin": "null"},
+    {"Sec-Fetch-Site": "cross-site"},
+])
+def test_api_keeps_loopback_host_origin_and_csrf_boundary(client, headers):
+    assert client.get("/api/review/returns", headers={**AUTH, **headers}).status_code == 403
+
+
+def test_old_native_control_and_manual_extraction_routes_are_absent(client):
+    for path in ("/api/review/target", ROOT + "/browser", ROOT + "/jobs/job/frame"):
+        assert client.get(path, headers=AUTH).status_code == 404
+    for path in (
+        INTAKE + "/process", ROOT + "/select", ROOT + "/resolve", ROOT + "/correct",
+        ROOT + "/proposals", ROOT + "/jobs/job/cancel", ROOT + "/jobs/job/field", ROOT + "/jobs/job/interact",
+        ROOT + "/jobs/job/source", ROOT + "/jobs/job/submit",
+    ):
+        assert client.post(path, headers=AUTH, json={}).status_code in (404, 405)
+    assert client.post(ROOT + "/jobs", headers=AUTH, json={}).status_code == 405
+    assert client.get(ROOT + "/jobs", headers=AUTH).json()[0]["status"] == "ready_for_review"
+
+
+def test_batch_approval_is_boolean_and_non_supported_media_is_blocked(client):
+    body = {"batchId": "drop", "files": [{"slot": "file", "filename": "source.txt", "mediaType": "text/plain"}]}
+    for invalid in (body, {**body, "approvedForAI": "true"}, {**body, "approvedForAI": True, "provider": "unapproved"}):
+        assert client.post(INTAKE + "/batches", headers=AUTH, json=invalid).status_code == 422
+    assert client.put(INTAKE + "/batches/drop/files/file", content=b"image", headers={
+        **AUTH, "Content-Type": "image/jpeg",
+    }).status_code == 415
+
+
+def test_return_upload_scope_rejects_an_unassigned_path_and_mismatched_hint(client):
+    body = {
+        "batchId": "drop", "approvedForAI": False, "returnHint": "another-return",
+        "files": [{"slot": "file", "filename": "source.txt", "mediaType": "text/plain"}],
+    }
+    path = ROOT + "/intake/batches"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=AUTH).json() == []
+    assert client.get(path.replace(RETURN, "another-return"), headers=AUTH).status_code == 404
+    assert client.post(path, headers=AUTH, json=body).status_code == 409
+    assert client.put(path.replace(RETURN, "another-return") + "/drop/files/file", headers=AUTH).status_code == 404
+
+
+def test_review_decision_requires_exact_field_version_and_expired_owner_can_recover(client):
+    backend = client.app.state.backend
+    access = ReviewAccess(backend.scope.firm_id, backend.scope.actor_id, RETURN)
+    active = ReviewSelectionSession(
+        access, input_revision=REVISION, draft_key="synthetic-draft",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1), bindings={},
     )
+    backend.active = active
+    body = {
+        "kind": "mark_reviewed", "reviewSessionId": active.id, "inputRevision": REVISION,
+        "expectedDecisionVersion": 0,
+    }
+    path = ROOT + "/review"
+    assert client.post(path + "/decisions", headers=AUTH, json=body).status_code == 422
+    assert client.post(path + "/decisions", headers=AUTH, json={
+        **body, "expectedFieldVersion": backend.field_version - 1,
+    }).status_code == 409
+    assert backend.decisions == 0
+    assert client.post(path + "/decisions", headers=AUTH, json={
+        **body, "expectedFieldVersion": backend.field_version,
+    }).json() == {"decisionVersion": 1}
+
+    active.expires_at = datetime.now(timezone.utc)
+    backend.native = SimpleNamespace(is_closed=lambda: False)
+    close = {"reviewSessionId": active.id}
+    assert client.post(path + "/close", json=close).status_code == 401
+    assert client.post(path.replace(RETURN, "another-return") + "/close", headers=AUTH, json=close).status_code == 404
+    assert client.post(path + "/close", headers=AUTH, json={"reviewSessionId": "forged"}).status_code == 404
+    assert client.post(path + "/close", headers=AUTH, json=close).status_code == 409
+    assert client.get(path + "/events", headers={**AUTH, "X-Review-Session": active.id}).status_code == 404
+    assert client.post(path + "/open", headers=AUTH, json={"inputRevision": REVISION}).json() == {
+        "status": "recovery_required", "reviewSessionId": active.id, "inputRevision": REVISION, "returnId": RETURN,
+    }
+    backend.native = SimpleNamespace(is_closed=lambda: True)
+    assert client.post(path + "/close", headers=AUTH, json=close).status_code == 204
+    assert backend.active is None
 
 
-def current_field(detail, identifier):
-    return next(field for field in detail["fields"] if field["id"] == identifier)
+def test_no_config_only_inspects_existing_workspace_and_does_not_rerun_history(tmp_path, ui):
+    data = tmp_path / "legacy"
+    store = seeded_store(data)
+    before = sha256(store.database_path.read_bytes()).hexdigest()
+    app = create_app(data, ui, port=8765, token=TOKEN)
+    with TestClient(app, base_url="http://127.0.0.1:8765", headers=AUTH) as browser:
+        assert not browser.get(INTAKE).json()["enabled"]
+        roots = browser.get("/api/review/returns").json()
+        assert roots and all(item["destination"] == "Archived intake" for item in roots)
+        path = f"/api/review/returns/{INDIVIDUAL_ID}"
+        detail = browser.get(path + "/evidence").json()
+        assert detail["reviewAvailable"] is False
+        assert all(field["status"] != "verified" and field["savedValue"] is None for field in detail["fields"])
+        assert browser.get(path + "/jobs").json() == []
+        assert browser.post(path + "/review/open", json={"inputRevision": detail["inputRevision"]}).status_code == 409
+        assert browser.get(path + "/review/events", headers={**AUTH, "X-Review-Session": "invented"}).status_code == 404
+    assert sha256(store.database_path.read_bytes()).hexdigest() == before
 
 
-def test_upload_does_not_create_clients_or_claim_extraction_without_a_key(client):
-    assert client.get(INTAKE).status_code == 401
-    response = upload(client, b"Client: Taylor Example\nTax year: 2025\nWages: 1200.00\n")
-    assert response.status_code == 201
-    document = response.json()
-    assert document["status"] == "uploaded"
-    assert client.get(RETURNS, headers=AUTH).json() == []
-    duplicate = upload(
-        client, b"Client: Taylor Example\nTax year: 2025\nWages: 1200.00\n", name="renamed.txt"
-    )
-    assert duplicate.json()["id"] == document["id"]
-    response = client.post(
-        INTAKE + "/process",
-        headers=AUTH,
-        json={
-            "documentIds": [document["id"]],
-            "approvedForAI": True,
-        },
-    )
-    assert response.status_code == 503
-    assert client.get(RETURNS, headers=AUTH).json() == []
-    inbox = client.get(INTAKE, headers=AUTH).json()
-    assert inbox["configured"] is False
-    assert all(group["returnId"] is None for item in inbox["documents"] for group in item["groups"])
+def test_missing_ui_does_not_create_workspace(tmp_path):
+    with pytest.raises(RuntimeError, match="Review UI is not built"):
+        create_app(tmp_path / "data", tmp_path / "missing-ui")
+    assert not (tmp_path / "data").exists()
 
 
-def test_external_processing_requires_explicit_boolean_consent(client):
-    document = upload(client, b"Client: Jamie Example\nTax year: 2025\n").json()
-    response = client.post(
-        INTAKE + "/process", headers=AUTH, json={"documentIds": [document["id"]]}
-    )
-    assert response.status_code == 422
-    response = client.post(
-        INTAKE + "/process",
-        headers=AUTH,
-        json={
-            "documentIds": [document["id"]],
-            "approvedForAI": "true",
-        },
-    )
-    assert response.status_code == 422
-    assert client.get(RETURNS, headers=AUTH).json() == []
-
-
-def test_invalid_or_unsupported_sources_do_not_create_partial_clients(client):
-    assert upload(client, b"image", name="photo.jpg", media_type="image/jpeg").status_code == 415
-    assert upload(client, b"\xff\xfe\x00invalid", name="broken.txt").status_code == 422
-    assert (
-        upload(client, b"not a PDF", name="broken.pdf", media_type="application/pdf").status_code
-        == 422
-    )
-    assert client.get(RETURNS, headers=AUTH).json() == []
-
-
-def test_preparer_can_enter_real_choices_zero_and_clear_without_reason_or_citations(client):
-    detail = client.app.state.store.create_return(
-        2025, client_name="Manual entry", return_type="individual"
-    )
-    root = RETURNS + "/" + detail["id"]
-    for field_id, value in [
-        ("filing_status", "Married filing jointly"),
-        ("number_of_dependents", "0"),
-        ("income_sources", '["w2_wages","rental"]'),
-    ]:
-        response = client.post(
-            root + "/correct",
-            headers=AUTH,
-            json={
-                "expectedRevision": detail["revision"],
-                "fieldId": field_id,
-                "value": value,
-            },
-        )
-        assert response.status_code == 200
-        detail = response.json()
-    assert current_field(detail, "filing_status")["value"] == "married_filing_jointly"
-    assert current_field(detail, "number_of_dependents")["value"] == "0"
-    assert current_field(detail, "income_sources")["value"] == '["w2_wages","rental"]'
-    assert current_field(detail, "income_sources")["valueOrigin"] == "preparer"
-    assert current_field(detail, "income_sources")["citations"] == []
-    response = client.post(
-        root + "/correct",
-        headers=AUTH,
-        json={
-            "expectedRevision": detail["revision"],
-            "fieldId": "income_sources",
-            "value": "[]",
-        },
-    )
-    assert response.status_code == 200
-    cleared = response.json()
-    assert current_field(cleared, "income_sources")["value"] == "[]"
-    # A stale browser observation must not overwrite the newer edit.
-    assert (
-        client.post(
-            root + "/correct",
-            headers=AUTH,
-            json={
-                "expectedRevision": detail["revision"],
-                "fieldId": "income_sources",
-                "value": '["rental"]',
-            },
-        ).status_code
-        == 409
-    )
-    assert client.get(root, headers=AUTH).json() == cleared
-
-
-def test_text_original_is_scoped_and_upload_alone_cannot_finish_preparation(client):
-    store = client.app.state.store
-    detail = store.create_return(2025, client_name="Text source owner", return_type="individual")
-    other = store.create_return(2025, client_name="Another owner", return_type="individual")
-    root = RETURNS + "/" + detail["id"]
-    original = "Client: Text source owner\nTax year: 2025\nPhone: 503-555-0101\n"
-    response = client.post(
-        root + "/documents",
-        content=original.encode(),
-        headers={
-            **AUTH,
-            "Content-Type": "text/plain",
-            "X-Document-Name": "intake.txt",
-            "X-Expected-Revision": str(detail["revision"]),
-        },
-    )
-    assert response.status_code == 200
-    detail = response.json()
-    document_id = detail["documents"][0]["id"]
-    path = "/documents/" + document_id + "/text"
-    assert client.get(root + path, headers=AUTH).text == original
-    assert client.get(RETURNS + "/" + other["id"] + path, headers=AUTH).status_code == 404
-    assert client.get(root + path).status_code == 401
-    assert current_field(detail, "phone")["value"] is None
-    assert current_field(detail, "urgency")["value"] is None
-    assert current_field(detail, "full_name")["valueOrigin"] == "workspace"
+def test_native_factory_requires_enrolled_config(tmp_path, ui):
+    with pytest.raises(ValueError, match="enrolled firm configuration"):
+        create_app(tmp_path, ui, native_review_factory=lambda *_: pytest.fail("unexpected connector launch"))
